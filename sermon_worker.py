@@ -2,6 +2,7 @@ import sqlite3
 import os
 import logging
 import time
+import torch
 from datetime import datetime, timedelta
 from TTS.api import TTS
 
@@ -37,6 +38,7 @@ def process_pending_jobs():
                 output_path = os.path.join(AUDIO_DIR, f"{sermon_guid}.mp3")
                 # Generate the audio file from the transcription using the preloaded model
                 tts.tts_to_file(text=job["transcription"], file_path=output_path)
+                torch.cuda.empty_cache()
                 finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(
                     "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ?",
