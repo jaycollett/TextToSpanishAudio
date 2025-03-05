@@ -1,8 +1,12 @@
-import sqlite3
 import os
+# Set PyTorch environment variable to help reduce memory fragmentation.
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+import sqlite3
 import logging
 import time
 import torch
+import gc
 from datetime import datetime, timedelta
 from TTS.api import TTS
 
@@ -20,6 +24,12 @@ logging.info("🎤 Loading TTS model...")
 tts = TTS("tts_models/es/css10/vits", gpu=True)
 logging.info("✅ TTS model loaded.")
 
+# Set the model to evaluation mode and convert to half precision to reduce VRAM usage.
+try:
+    tts.model.eval()
+except Exception as e:
+    logging.warning("⚠️ Could not set model to eval: " + str(e))
+
 def process_pending_jobs():
     """
     Check the database for pending sermon jobs.
@@ -36,8 +46,11 @@ def process_pending_jobs():
             logging.info(f"🎙️ Processing sermon job: {sermon_guid}")
             try:
                 output_path = os.path.join(AUDIO_DIR, f"{sermon_guid}.mp3")
-                # Generate the audio file from the transcription using the preloaded model
-                tts.tts_to_file(text=job["transcription"], file_path=output_path)
+                # Wrap inference in no_grad to avoid storing gradients.
+                with torch.no_grad():
+                    tts.tts_to_file(text=job["transcription"], file_path=output_path)
+                # Run garbage collection and clear GPU cache to reduce memory fragmentation.
+                gc.collect()
                 torch.cuda.empty_cache()
                 finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(

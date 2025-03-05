@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Help with cuda vram use
-ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV Pexport PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 
 # Expose the port your Flask app listens on
 EXPOSE 5055
