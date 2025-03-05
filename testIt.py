@@ -3,7 +3,7 @@ import time
 import uuid
 
 # Base URL for the API
-API_BASE_URL = "http://localhost:5055"
+API_BASE_URL = "http://192.168.0.210:5055"
 
 def submit_job():
     # Generate a unique sermon GUID

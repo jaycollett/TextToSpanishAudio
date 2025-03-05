@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY . .
 
+# Help with cuda vram use
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Expose the port your Flask app listens on
 EXPOSE 5055
 
