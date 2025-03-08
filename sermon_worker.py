@@ -19,21 +19,37 @@ AUDIO_DIR = "/data/audiofiles"
 # Ensure the audio directory exists
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
-# Load the TTS model (using the specified Spanish voice model) only once
-logging.info("🎤 Loading TTS model...")
-tts = TTS("tts_models/es/css10/vits", gpu=True)
-logging.info("✅ TTS model loaded.")
+# Define the model IDs
+NORMAL_MODEL_ID = "tts_models/es/css10/vits"
 
-# Set the model to evaluation mode and convert to half precision to reduce VRAM usage.
-try:
-    tts.model.eval()
-except Exception as e:
-    logging.warning("⚠️ Could not set model to eval: " + str(e))
+# Singleton class for the normal TTS model
+class TTSModelSingleton:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            logging.info("🎤 Loading normal TTS model...")
+            cls._instance = TTS(NORMAL_MODEL_ID, gpu=True)
+            try:
+                cls._instance.model.eval()
+            except Exception as e:
+                logging.warning("⚠️ Could not set normal model to eval: " + str(e))
+            logging.info("✅ Normal TTS model loaded and set to eval.")
+        return cls._instance
+
+def unload_normal_model():
+    """Unload the normal model and clear GPU caches."""
+    TTSModelSingleton._instance = None
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 def process_pending_jobs():
     """
     Check the database for pending sermon jobs.
-    For each pending job, generate an MP3 using the preloaded TTS model and update the job status.
+    For each pending job, generate an MP3 using the preloaded TTS model.
+    If a CUDA out-of-memory error occurs, try using CPU for inference.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -44,28 +60,69 @@ def process_pending_jobs():
         for job in jobs:
             sermon_guid = job["sermon_guid"]
             logging.info(f"🎙️ Processing sermon job: {sermon_guid}")
+            output_path = os.path.join(AUDIO_DIR, f"{sermon_guid}.mp3")
             try:
-                output_path = os.path.join(AUDIO_DIR, f"{sermon_guid}.mp3")
-                # Wrap inference in no_grad to avoid storing gradients.
+                # Use the singleton normal TTS model instance (GPU mode).
+                tts = TTSModelSingleton.get_instance()
                 with torch.no_grad():
                     tts.tts_to_file(text=job["transcription"], file_path=output_path)
-                # Run garbage collection and clear GPU cache to reduce memory fragmentation.
-                gc.collect()
-                torch.cuda.empty_cache()
-                finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute(
-                    "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ?",
-                    (finished_at, output_path, job["id"])
-                )
-                conn.commit()
-                logging.info(f"✅ Completed sermon job: {sermon_guid}")
+                logging.info(f"✅ Completed sermon job with normal (GPU) model: {sermon_guid}")
+
             except Exception as e:
-                logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
-                cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
-                conn.commit()
+                # Check if the error is due to CUDA running out of memory.
+                if "out of memory" in str(e).lower():
+                    logging.warning("⚠️ CUDA OOM detected. Switching to CPU fallback...")
+                    # Unload the normal GPU model and clear cache.
+                    unload_normal_model()
+                    
+                    try:
+                        # Load the same model on CPU as a fallback.
+                        logging.info("🎤 Loading TTS model on CPU for fallback...")
+                        cpu_tts = TTS(NORMAL_MODEL_ID, gpu=False)
+                        try:
+                            cpu_tts.model.eval()
+                        except Exception as ex:
+                            logging.warning("⚠️ Could not set CPU model to eval: " + str(ex))
+                        with torch.no_grad():
+                            cpu_tts.tts_to_file(text=job["transcription"], file_path=output_path)
+                        logging.info(f"✅ Successfully processed sermon job with CPU fallback: {sermon_guid}")
+                    except Exception as cpu_error:
+                        logging.error("❌ CPU fallback also failed for sermon " + sermon_guid + ": " + str(cpu_error))
+                        cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
+                        conn.commit()
+                        continue  # Skip to the next job
+                    finally:
+                        # Clean up the CPU model and GPU memory.
+                        try:
+                            del cpu_tts
+                        except Exception:
+                            pass
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        # Reinitialize normal GPU model for subsequent requests.
+                        unload_normal_model()
+                        _ = TTSModelSingleton.get_instance()
+                else:
+                    logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
+                    cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
+                    conn.commit()
+                    continue
+
+            # Update the job as complete if the processing was successful.
+            finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ?",
+                (finished_at, output_path, job["id"])
+            )
+            conn.commit()
+
+            # Run garbage collection and clear GPU cache after each job.
+            gc.collect()
+            torch.cuda.empty_cache()
         conn.close()
     except Exception as e:
         logging.error(f"❌ Error accessing database: {e}")
+
 
 def daily_purge():
     """
