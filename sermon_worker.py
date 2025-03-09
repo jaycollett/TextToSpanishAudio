@@ -5,7 +5,7 @@ import torch
 import gc
 import time
 from datetime import datetime, timedelta
-from TTS import TTS  # Assuming the TTS library provides this
+from TTS.api import TTS
 from tts_model_singleton import TTSModelSingleton  # Your singleton for the GPU model
 
 # Global configuration values.
