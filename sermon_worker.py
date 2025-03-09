@@ -6,6 +6,7 @@ import gc
 import time
 from datetime import datetime, timedelta
 from TTS.api import TTS
+from pydub import AudioSegment  # Used for concatenating audio segments
 
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
@@ -36,6 +37,61 @@ def unload_normal_model():
     except Exception as e:
         logging.warning("Failed to unload GPU model: " + str(e))
 
+def combine_audio_files(file_list, output_file):
+    """
+    Combine a list of audio files into one using pydub.
+    """
+    combined = None
+    for file in file_list:
+        segment = AudioSegment.from_file(file)
+        segment = segment.set_channels(1)  # Convert to mono
+        segment = segment.set_frame_rate(22050)  # Set sample rate to 22050Hz
+        segment = segment.normalize()  # Normalize loudness
+        if combined is None:
+            combined = segment
+        else:
+            combined += segment
+
+    # Export final audio file with 352kbps MP3 settings
+    combined.export(output_file, format="mp3", bitrate="352k")
+
+def synthesize_text(tts, text, output_file):
+    """
+    If text is too long, split it into smaller segments, synthesize each segment,
+    and then combine the resulting audio files into one output file.
+    """
+    max_chars = 1000  # Adjust this threshold based on experimentation
+    if len(text) > max_chars:
+        segments = []
+        current_segment = ""
+        # Split by period (this is a simple splitter; you can enhance it as needed)
+        for sentence in text.split('.'):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            sentence += "."  # Append the period back
+            if len(current_segment) + len(sentence) <= max_chars:
+                current_segment = f"{current_segment} {sentence}".strip() if current_segment else sentence
+            else:
+                segments.append(current_segment)
+                current_segment = sentence
+        if current_segment:
+            segments.append(current_segment)
+        
+        temp_files = []
+        for i, segment in enumerate(segments):
+            temp_file = output_file + f".part{i}.mp3"
+            tts.tts_to_file(text=segment, file_path=temp_file)
+            temp_files.append(temp_file)
+            gc.collect()
+            torch.cuda.empty_cache()
+        combine_audio_files(temp_files, output_file)
+        # Remove temporary segment files.
+        for f in temp_files:
+            os.remove(f)
+    else:
+        tts.tts_to_file(text=text, file_path=output_file)
+
 def purge_old_jobs():
     """
     Purge completed or error jobs older than 24 hours and remove associated audio files.
@@ -65,7 +121,6 @@ def process_pending_jobs():
     """
     Check the database for pending sermon jobs.
     For each pending job, generate an MP3 using the preloaded TTS model.
-    If a CUDA out-of-memory error occurs, try using CPU for inference.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -80,50 +135,13 @@ def process_pending_jobs():
             try:
                 # Use the singleton normal TTS model instance (GPU mode).
                 tts = TTSModelSingleton.get_instance()
-                with torch.no_grad():
-                    tts.tts_to_file(text=job["transcription"], file_path=output_path)
-                logging.info(f"✅ Completed sermon job with normal (GPU) model: {sermon_guid}")
-
+                synthesize_text(tts, job["transcription"], output_path)
+                logging.info(f"✅ Completed sermon job: {sermon_guid}")
             except Exception as e:
-                # Check if the error is due to CUDA running out of memory.
-                if "out of memory" in str(e).lower():
-                    logging.warning("⚠️ CUDA OOM detected. Switching to CPU fallback...")
-                    # Unload the normal GPU model and clear cache.
-                    unload_normal_model()
-                    
-                    try:
-                        # Load the same model on CPU as a fallback.
-                        logging.info("🎤 Loading TTS model on CPU for fallback...")
-                        cpu_tts = TTS(NORMAL_MODEL_ID, gpu=False)
-                        with torch.no_grad():
-                            cpu_tts.tts_to_file(text=job["transcription"], file_path=output_path)
-                        logging.info(f"✅ Successfully processed sermon job with CPU fallback: {sermon_guid}")
-                    except Exception as cpu_error:
-                        logging.error("❌ CPU fallback also failed for sermon " + sermon_guid + ": " + str(cpu_error))
-                        cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
-                        conn.commit()
-                        continue  # Skip to the next job
-                    finally:
-                        # Clean up the CPU model and GPU memory.
-                        try:
-                            del cpu_tts
-                        except Exception:
-                            pass
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                        # Wait before reinitializing the GPU model.
-                        logging.info("⏳ Waiting 10 seconds before reinitializing GPU model...")
-                        time.sleep(10)
-                        try:
-                            unload_normal_model()
-                            _ = TTSModelSingleton.get_instance()
-                        except Exception as reinit_error:
-                            logging.error("❌ Failed to reinitialize GPU model: " + str(reinit_error))
-                else:
-                    logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
-                    cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
-                    conn.commit()
-                    continue
+                logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
+                cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
+                conn.commit()
+                continue
 
             # Update the job as complete if the processing was successful.
             finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -133,7 +151,6 @@ def process_pending_jobs():
             )
             conn.commit()
 
-            # Run garbage collection and clear GPU cache after each job.
             gc.collect()
             torch.cuda.empty_cache()
         conn.close()
@@ -151,13 +168,11 @@ def background_worker_loop():
         except Exception as loop_error:
             logging.error("❌ Error in background worker loop: " + str(loop_error))
         
-        # Run purge every 5 minutes.
         if datetime.utcnow() - last_purge_time >= timedelta(minutes=5):
             logging.info("🧹 Running scheduled purge of old jobs...")
             purge_old_jobs()
             last_purge_time = datetime.utcnow()
         
-        # Sleep briefly between iterations to avoid a tight loop.
         time.sleep(5)
 
 if __name__ == "__main__":
