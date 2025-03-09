@@ -13,6 +13,19 @@ DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/data/audiofiles")
 NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/es/css10/vits")
 
+class TTSModelSingleton:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = TTS("tts_models/es/css10/vits", gpu=True)
+        return cls._instance
+
+    @classmethod
+    def unload_instance(cls):
+        cls._instance = None
+
 def unload_normal_model():
     """
     Unload the currently loaded GPU model and clear GPU memory.
