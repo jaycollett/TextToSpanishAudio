@@ -6,7 +6,6 @@ import gc
 import time
 from datetime import datetime, timedelta
 from TTS.api import TTS
-from tts_model_singleton import TTSModelSingleton  # Your singleton for the GPU model
 
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
@@ -19,7 +18,7 @@ class TTSModelSingleton:
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = TTS("tts_models/es/css10/vits", gpu=True)
+            cls._instance = TTS(NORMAL_MODEL_ID, gpu=True)
         return cls._instance
 
     @classmethod
