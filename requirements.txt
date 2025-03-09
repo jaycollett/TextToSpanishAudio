@@ -1,4 +1,4 @@
 Flask
-TTS
+coqui-tts
 requests
 pydub
