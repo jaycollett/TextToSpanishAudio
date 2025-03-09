@@ -83,10 +83,6 @@ def process_pending_jobs():
                         # Load the same model on CPU as a fallback.
                         logging.info("🎤 Loading TTS model on CPU for fallback...")
                         cpu_tts = TTS(NORMAL_MODEL_ID, gpu=False)
-                        try:
-                            cpu_tts.model.eval()
-                        except Exception as ex:
-                            logging.warning("⚠️ Could not set CPU model to eval: " + str(ex))
                         with torch.no_grad():
                             cpu_tts.tts_to_file(text=job["transcription"], file_path=output_path)
                         logging.info(f"✅ Successfully processed sermon job with CPU fallback: {sermon_guid}")
