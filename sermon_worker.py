@@ -1,49 +1,53 @@
 import os
-# Set PyTorch environment variable to help reduce memory fragmentation.
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
 import sqlite3
 import logging
-import time
 import torch
 import gc
+import time
 from datetime import datetime, timedelta
-from TTS.api import TTS
+from TTS import TTS  # Assuming the TTS library provides this
+from tts_model_singleton import TTSModelSingleton  # Your singleton for the GPU model
 
-# Configure logging with emojis
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-DB_PATH = "/data/jobs.db"
-AUDIO_DIR = "/data/audiofiles"
-
-# Ensure the audio directory exists
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# Define the model IDs
-NORMAL_MODEL_ID = "tts_models/es/css10/vits"
-
-# Singleton class for the normal TTS model
-class TTSModelSingleton:
-    _instance = None
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            logging.info("🎤 Loading normal TTS model...")
-            cls._instance = TTS(NORMAL_MODEL_ID, gpu=True)
-            try:
-                cls._instance.model.eval()
-            except Exception as e:
-                logging.warning("⚠️ Could not set normal model to eval: " + str(e))
-            logging.info("✅ Normal TTS model loaded and set to eval.")
-        return cls._instance
+# Global configuration values.
+DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
+AUDIO_DIR = os.getenv("AUDIO_DIR", "/data/audiofiles")
+NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/es/css10/vits")
 
 def unload_normal_model():
-    """Unload the normal model and clear GPU caches."""
-    TTSModelSingleton._instance = None
-    gc.collect()
-    torch.cuda.empty_cache()
+    """
+    Unload the currently loaded GPU model and clear GPU memory.
+    """
+    try:
+        TTSModelSingleton.unload_instance()
+        torch.cuda.empty_cache()
+        logging.info("GPU model unloaded and cache cleared.")
+    except Exception as e:
+        logging.warning("Failed to unload GPU model: " + str(e))
 
+def purge_old_jobs():
+    """
+    Purge completed or error jobs older than 24 hours and remove associated audio files.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        threshold = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute(
+            "SELECT id, sermon_guid, audio_file FROM sermons WHERE (status IN ('complete', 'error')) AND finished_at <= ?",
+            (threshold,)
+        )
+        jobs = cursor.fetchall()
+        for job in jobs:
+            if job["audio_file"] and os.path.exists(job["audio_file"]):
+                os.remove(job["audio_file"])
+                logging.info(f"🗑️ Removed audio file for sermon {job['sermon_guid']}")
+            cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
+            logging.info(f"🗑️ Purged job {job['sermon_guid']} from database")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"❌ Error during purging old jobs: {e}")
 
 def process_pending_jobs():
     """
@@ -99,9 +103,14 @@ def process_pending_jobs():
                             pass
                         gc.collect()
                         torch.cuda.empty_cache()
-                        # Reinitialize normal GPU model for subsequent requests.
-                        unload_normal_model()
-                        _ = TTSModelSingleton.get_instance()
+                        # Wait before reinitializing the GPU model.
+                        logging.info("⏳ Waiting 10 seconds before reinitializing GPU model...")
+                        time.sleep(10)
+                        try:
+                            unload_normal_model()
+                            _ = TTSModelSingleton.get_instance()
+                        except Exception as reinit_error:
+                            logging.error("❌ Failed to reinitialize GPU model: " + str(reinit_error))
                 else:
                     logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
                     cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
@@ -123,40 +132,27 @@ def process_pending_jobs():
     except Exception as e:
         logging.error(f"❌ Error accessing database: {e}")
 
-
-def daily_purge():
-    """
-    Purge sermon jobs (complete or error) older than 24 hours and remove their associated audio files.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        threshold = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            "SELECT id, sermon_guid, audio_file FROM sermons WHERE (status IN ('complete', 'error')) AND finished_at <= ?",
-            (threshold,)
-        )
-        jobs = cursor.fetchall()
-        for job in jobs:
-            if job["audio_file"] and os.path.exists(job["audio_file"]):
-                os.remove(job["audio_file"])
-                logging.info(f"🗑️ Deleted audio file for sermon {job['sermon_guid']}")
-            cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-            logging.info(f"🗑️ Purged job {job['sermon_guid']} from database")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Error purging old jobs: {e}")
-
 def background_worker_loop():
-    last_purge = time.time()
-    purge_interval = 24 * 60 * 60  # 24 hours
-    logging.info("⏰ Starting sermon worker loop...")
+    """
+    Background loop that continuously processes pending jobs and purges old jobs every 5 minutes.
+    """
+    last_purge_time = datetime.utcnow() - timedelta(minutes=5)
     while True:
-        process_pending_jobs()
-        if time.time() - last_purge >= purge_interval:
-            daily_purge()
-            last_purge = time.time()
-        logging.info("⏰ Sleeping for 60 seconds before next check...")
-        time.sleep(60)
+        try:
+            process_pending_jobs()
+        except Exception as loop_error:
+            logging.error("❌ Error in background worker loop: " + str(loop_error))
+        
+        # Run purge every 5 minutes.
+        if datetime.utcnow() - last_purge_time >= timedelta(minutes=5):
+            logging.info("🧹 Running scheduled purge of old jobs...")
+            purge_old_jobs()
+            last_purge_time = datetime.utcnow()
+        
+        # Sleep briefly between iterations to avoid a tight loop.
+        time.sleep(5)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.info("🔥 Starting background worker loop...")
+    background_worker_loop()
