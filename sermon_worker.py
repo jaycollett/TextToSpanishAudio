@@ -81,7 +81,7 @@ def synthesize_text(tts, text, output_file):
         temp_files = []
         for i, segment in enumerate(segments):
             temp_file = output_file + f".part{i}.mp3"
-            tts.tts_to_file(text=segment, file_path=temp_file, language="es")
+            tts.tts_to_file(text=segment, file_path=temp_file)
             temp_files.append(temp_file)
             gc.collect()
             torch.cuda.empty_cache()
@@ -90,7 +90,7 @@ def synthesize_text(tts, text, output_file):
         for f in temp_files:
             os.remove(f)
     else:
-        tts.tts_to_file(text=text, file_path=output_file, language='es', speaker='default')
+        tts.tts_to_file(text=text, file_path=output_file)
 
 def purge_old_jobs():
     """
