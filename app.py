@@ -45,10 +45,14 @@ def init_db():
             )
         ''')
         db.commit()
-    logging.info("✅ Database initialized successfully.")
+    logging.info("[APP] INIT_DB - Database initialized successfully.")
 
 def purge_old_jobs():
     """Purge completed or error jobs older than 24 hours and remove associated audio files."""
+    db = None
+    purge_count = 0
+    file_failures = 0
+    db_failures = 0
     try:
         db = get_db()
         cursor = db.cursor()
@@ -59,14 +63,32 @@ def purge_old_jobs():
         )
         jobs = cursor.fetchall()
         for job in jobs:
+            file_deleted = True
             if job["audio_file"] and os.path.exists(job["audio_file"]):
-                os.remove(job["audio_file"])
-                logging.info(f"🗑️ Removed audio file for sermon {job['sermon_guid']}")
-            cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-            logging.info(f"🗑️ Purged job {job['sermon_guid']} from database")
+                try:
+                    os.remove(job["audio_file"])
+                    logging.info(f"[APP] PURGE - Removed audio file for sermon {job['sermon_guid']}")
+                except Exception as file_err:
+                    file_failures += 1
+                    file_deleted = False
+                    logging.error(f"[APP] PURGE - Failed to remove audio file for sermon {job['sermon_guid']}: {file_err}")
+            try:
+                cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
+                logging.info(f"[APP] PURGE - Purged job {job['sermon_guid']} from database")
+                purge_count += 1
+            except Exception as db_err:
+                db_failures += 1
+                logging.error(f"[APP] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
         db.commit()
     except Exception as e:
-        logging.error(f"❌ Error during purging old jobs: {e}")
+        logging.error(f"[APP] PURGE - Error during purging old jobs: {e}")
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception as e:
+                logging.error(f"[APP] PURGE - Error closing DB: {e}")
+        logging.info(f"[APP] PURGE - Purge complete. Jobs purged: {purge_count}, file failures: {file_failures}, DB failures: {db_failures}")
 
 @app.teardown_appcontext
 def close_db_connection(exception):
@@ -87,7 +109,7 @@ def submit_sermon():
         transcription = data.get('transcription')
         
         if not sermon_guid or not transcription:
-            logging.error("⚠️ Missing sermon_guid or transcription in request.")
+            logging.error("[APP] SUBMIT_SERMON - Missing sermon_guid or transcription in request.")
             return jsonify({"error": "sermon_guid and transcription are required"}), 400
         
         db = get_db()
@@ -95,7 +117,7 @@ def submit_sermon():
         # Check for duplicate sermon_guid
         cursor.execute("SELECT id FROM sermons WHERE sermon_guid = ?", (sermon_guid,))
         if cursor.fetchone():
-            logging.warning(f"🚫 Duplicate sermon_guid: {sermon_guid}")
+            logging.warning(f"[APP] SUBMIT_SERMON - Duplicate sermon_guid: {sermon_guid}")
             return jsonify({"error": "A job with this sermon_guid already exists"}), 409
         
         cursor.execute('''
@@ -103,10 +125,10 @@ def submit_sermon():
             VALUES (?, ?, 'pending')
         ''', (sermon_guid, transcription))
         db.commit()
-        logging.info(f"📥 Sermon job submitted: {sermon_guid}")
+        logging.info(f"[APP] SUBMIT_SERMON - Sermon job submitted: {sermon_guid}")
         return jsonify({"message": "Sermon job submitted successfully"}), 201
     except Exception as e:
-        logging.exception("❌ Error in submit_sermon endpoint.")
+        logging.exception("[APP] SUBMIT_SERMON - Error in submit_sermon endpoint.")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/download/<sermon_guid>', methods=['GET'])
@@ -120,16 +142,16 @@ def download_audio(sermon_guid):
         cursor.execute("SELECT audio_file, status FROM sermons WHERE sermon_guid = ?", (sermon_guid,))
         job = cursor.fetchone()
         if not job:
-            logging.warning(f"🔍 Sermon job not found: {sermon_guid}")
+            logging.warning(f"[APP] DOWNLOAD - Sermon job not found: {sermon_guid}")
             return jsonify({"error": "Sermon job not found"}), 404
         if job["status"] != "complete" or not job["audio_file"]:
-            logging.warning(f"⌛ Sermon job not complete: {sermon_guid}")
+            logging.warning(f"[APP] DOWNLOAD - Sermon job not complete: {sermon_guid}")
             return jsonify({"error": "Sermon job is not complete yet"}), 400
         
-        logging.info(f"📤 Sending audio file for sermon {sermon_guid}")
+        logging.info(f"[APP] DOWNLOAD - Sending audio file for sermon {sermon_guid}")
         return send_file(job["audio_file"], as_attachment=True)
     except Exception as e:
-        logging.exception("❌ Error in download_audio endpoint.")
+        logging.exception("[APP] DOWNLOAD - Error in download_audio endpoint.")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/status/<sermon_guid>', methods=['GET'])
@@ -144,7 +166,7 @@ def check_status(sermon_guid):
         cursor.execute("SELECT status, audio_file, created_at, finished_at FROM sermons WHERE sermon_guid = ?", (sermon_guid,))
         job = cursor.fetchone()
         if not job:
-            logging.warning(f"🔍 Sermon job not found: {sermon_guid}")
+            logging.warning(f"[APP] DOWNLOAD - Sermon job not found: {sermon_guid}")
             return jsonify({"error": "Sermon job not found"}), 404
         
         response = {
@@ -157,10 +179,10 @@ def check_status(sermon_guid):
             # Assume the server URL is the same host:port
             response["download_url"] = f"/download/{sermon_guid}"
         
-        logging.info(f"📊 Status checked for sermon {sermon_guid}: {job['status']}")
+        logging.info(f"[APP] STATUS - Status checked for sermon {sermon_guid}: {job['status']}")
         return jsonify(response), 200
     except Exception as e:
-        logging.exception("❌ Error in check_status endpoint.")
+        logging.exception("[APP] STATUS - Error in check_status endpoint.")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
@@ -200,10 +222,10 @@ def list_pending():
         </body>
         </html>
         """
-        logging.info("📋 Displayed pending sermon jobs.")
+        logging.info("[APP] LIST_PENDING - Displayed pending sermon jobs.")
         return html, 200
     except Exception as e:
-        logging.exception("❌ Error in list_pending endpoint.")
+        logging.exception("[APP] LIST_PENDING - Error in list_pending endpoint.")
         return f"<p>Error: {str(e)}</p>", 500
 
 # (Optional) Endpoint to manually trigger purge (for testing/debugging)
@@ -211,18 +233,18 @@ def list_pending():
 def manual_purge():
     try:
         purge_old_jobs()
-        logging.info("🗑️ Manual purge executed.")
+        logging.info("[APP] MANUAL_PURGE - Manual purge executed.")
         return jsonify({"message": "Old jobs purged successfully."}), 200
     except Exception as e:
-        logging.exception("❌ Error in manual_purge endpoint.")
+        logging.exception("[APP] MANUAL_PURGE - Error in manual_purge endpoint.")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    logging.info("🔥 Starting Sermon TTS API Server...")
+    logging.info("[APP] STARTUP - Starting Sermon TTS API Server...")
     init_db()
 
     worker_thread = threading.Thread(target=background_worker_loop, daemon=True)
     worker_thread.start()
 
-    logging.info("✅ Sermon TTS API Server started successfully on port 5055.")
+    logging.info("[APP] STARTUP - Sermon TTS API Server started successfully on port 5055.")
     app.run(host='0.0.0.0', port=5055, debug=True, use_reloader=False)

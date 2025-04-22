@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Install system dependencies (e.g., build tools and libsndfile for audio processing)
 RUN apt-get update && apt-get install -y \
@@ -14,11 +14,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download and cache Coqui TTS xtts_v2 model, auto-accept license
+RUN echo y | python -c "from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2', gpu=False)"
+
 # Copy the application code
 COPY . .
 
 # Help with cuda vram use
-ENV Pexport PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
+ENV Pexport=PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 
 # Expose the port your Flask app listens on
 EXPOSE 5055

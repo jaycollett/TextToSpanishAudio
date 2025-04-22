@@ -11,7 +11,7 @@ from pydub import AudioSegment  # Used for concatenating audio segments
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/data/audiofiles")
-NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/es/css10/vits")
+NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/multilingual/multi-dataset/xtts_v2")
 
 class TTSModelSingleton:
     _instance = None
@@ -33,9 +33,9 @@ def unload_normal_model():
     try:
         TTSModelSingleton.unload_instance()
         torch.cuda.empty_cache()
-        logging.info("GPU model unloaded and cache cleared.")
+        logging.info("[WORKER] MODEL - GPU model unloaded and cache cleared.")
     except Exception as e:
-        logging.warning("Failed to unload GPU model: " + str(e))
+        logging.warning("[WORKER] MODEL - Failed to unload GPU model: " + str(e))
 
 def combine_audio_files(file_list, output_file):
     """
@@ -81,7 +81,7 @@ def synthesize_text(tts, text, output_file):
         temp_files = []
         for i, segment in enumerate(segments):
             temp_file = output_file + f".part{i}.mp3"
-            tts.tts_to_file(text=segment, file_path=temp_file)
+            tts.tts_to_file(text=segment, file_path=temp_file, language='es')
             temp_files.append(temp_file)
             gc.collect()
             torch.cuda.empty_cache()
@@ -90,7 +90,7 @@ def synthesize_text(tts, text, output_file):
         for f in temp_files:
             os.remove(f)
     else:
-        tts.tts_to_file(text=text, file_path=output_file)
+        tts.tts_to_file(text=text, file_path=output_file, language='es')
 
 def purge_old_jobs():
     """
@@ -109,13 +109,13 @@ def purge_old_jobs():
         for job in jobs:
             if job["audio_file"] and os.path.exists(job["audio_file"]):
                 os.remove(job["audio_file"])
-                logging.info(f"🗑️ Removed audio file for sermon {job['sermon_guid']}")
+                logging.info(f"[WORKER] PURGE - Removed audio file for sermon {job['sermon_guid']}")
             cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-            logging.info(f"🗑️ Purged job {job['sermon_guid']} from database")
+            logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"❌ Error during purging old jobs: {e}")
+        logging.error(f"[WORKER] PURGE - Error during purging old jobs: {e}")
 
 def process_pending_jobs():
     """
@@ -130,15 +130,15 @@ def process_pending_jobs():
         jobs = cursor.fetchall()
         for job in jobs:
             sermon_guid = job["sermon_guid"]
-            logging.info(f"🎙️ Processing sermon job: {sermon_guid}")
+            logging.info(f"[WORKER] PROCESS - Processing sermon job: {sermon_guid}")
             output_path = os.path.join(AUDIO_DIR, f"{sermon_guid}.mp3")
             try:
                 # Use the singleton normal TTS model instance (GPU mode).
                 tts = TTSModelSingleton.get_instance()
                 synthesize_text(tts, job["transcription"], output_path)
-                logging.info(f"✅ Completed sermon job: {sermon_guid}")
+                logging.info(f"[WORKER] PROCESS - Completed sermon job: {sermon_guid}")
             except Exception as e:
-                logging.error(f"❌ Error processing sermon {sermon_guid}: {e}")
+                logging.error(f"[WORKER] PROCESS - Error processing sermon {sermon_guid}: {e}")
                 cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
                 conn.commit()
                 continue
@@ -155,7 +155,7 @@ def process_pending_jobs():
             torch.cuda.empty_cache()
         conn.close()
     except Exception as e:
-        logging.error(f"❌ Error accessing database: {e}")
+        logging.error(f"[WORKER] DB - Error accessing database: {e}")
 
 def background_worker_loop():
     """
@@ -166,10 +166,10 @@ def background_worker_loop():
         try:
             process_pending_jobs()
         except Exception as loop_error:
-            logging.error("❌ Error in background worker loop: " + str(loop_error))
+            logging.error("[WORKER] LOOP - Error in background worker loop: " + str(loop_error))
         
         if datetime.utcnow() - last_purge_time >= timedelta(minutes=5):
-            logging.info("🧹 Running scheduled purge of old jobs...")
+            logging.info("[WORKER] PURGE - Running scheduled purge of old jobs...")
             purge_old_jobs()
             last_purge_time = datetime.utcnow()
         
@@ -177,5 +177,5 @@ def background_worker_loop():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-    logging.info("🔥 Starting background worker loop...")
+    logging.info("[WORKER] STARTUP - Starting background worker loop...")
     background_worker_loop()
