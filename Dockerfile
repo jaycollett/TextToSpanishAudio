@@ -14,8 +14,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download and cache Coqui TTS xtts_v2 model, auto-accept license
-RUN echo y | python -c "from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2', gpu=False)"
+# Download and cache Coqui TTS Spanish male model, auto-accept license
+RUN echo y | python -c "from TTS.api import TTS; TTS('tts_models/es/css10/vits', gpu=False)"
 
 # Copy the application code
 COPY . .

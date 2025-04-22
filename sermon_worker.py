@@ -11,7 +11,7 @@ from pydub import AudioSegment  # Used for concatenating audio segments
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/data/audiofiles")
-NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/multilingual/multi-dataset/xtts_v2")
+NORMAL_MODEL_ID = os.getenv("NORMAL_MODEL_ID", "tts_models/es/css10/vits")
 
 class TTSModelSingleton:
     _instance = None
@@ -81,7 +81,7 @@ def synthesize_text(tts, text, output_file):
         temp_files = []
         for i, segment in enumerate(segments):
             temp_file = output_file + f".part{i}.mp3"
-            tts.tts_to_file(text=segment, file_path=temp_file, language='es', speaker='default')
+            tts.tts_to_file(text=segment, file_path=temp_file, language="es")
             temp_files.append(temp_file)
             gc.collect()
             torch.cuda.empty_cache()
