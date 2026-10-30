@@ -55,8 +55,11 @@ def combine_audio_files(file_list, output_file):
     # Normalize loudness once over the whole sermon, so short segments are not
     # each raised to full volume on their own.
     combined = combined.normalize()
-    # Export final audio file with 352kbps MP3 settings
-    combined.export(output_file, format="mp3", bitrate="352k")
+    # 96 kbps mono is plenty for one speaking voice at 22050 Hz. The old
+    # "352k" setting was never honoured: at 22050 Hz the MP3 is MPEG-2 Layer
+    # III, whose ceiling is 160 kbps, so LAME was writing 160 kbps. On a
+    # 3m22s Spanish speech sample, 96k took the file from 4.05 MB to 2.43 MB.
+    combined.export(output_file, format="mp3", bitrate="96k")
 
 def synthesize_text(tts, text, output_file):
     """

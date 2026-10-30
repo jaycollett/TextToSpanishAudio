@@ -383,6 +383,34 @@ def test_synthesize_text_writes_real_mp3(worker, tmp_path, text):
     assert [p.name for p in tmp_path.iterdir()] == ["out.mp3"]
 
 
+# Bitrates (kbps) by header index for MPEG-2 Layer III, which is what LAME
+# writes at 22050 Hz.
+MPEG2_L3_KBPS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+
+
+def mp3_frames(data):
+    """Yield (kbps, sample_rate, mono) for every MPEG-2 Layer III frame."""
+    i = 0
+    if data[:3] == b"ID3":
+        i = 10 + ((data[6] << 21) | (data[7] << 14) | (data[8] << 7) | data[9])
+    while i + 4 <= len(data):
+        b1, b2, b3 = data[i + 1], data[i + 2], data[i + 3]
+        assert data[i] == 0xFF and b1 & 0xFE == 0xF2, f"no MPEG-2 Layer III frame at {i}"
+        kbps = MPEG2_L3_KBPS[b2 >> 4]
+        sample_rate = [22050, 24000, 16000][(b2 >> 2) & 3]
+        yield kbps, sample_rate, b3 >> 6 == 3
+        i += 72000 * kbps // sample_rate + ((b2 >> 1) & 1)
+
+
+@needs_real_pydub
+def test_synthesize_text_exports_96k_mono_22050(worker, tmp_path):
+    out = tmp_path / "out.mp3"
+    worker.synthesize_text(WavTTS(), "Hola a todos, hermanos y hermanas. " * 30, str(out))
+    frames = list(mp3_frames(out.read_bytes()))
+    assert len(frames) > 1
+    assert set(frames) == {(96, 22050, True)}
+
+
 def test_app_uses_worker_db_and_audio_paths(worker, monkeypatch, tmp_path):
     import importlib
     from unittest import mock
