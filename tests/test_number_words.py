@@ -35,9 +35,13 @@ def test_normalize_numbers_plain_cardinals(text, expected):
         ("Romanos 8:28", "Romanos ocho, veintiocho"),
         ("Apocalipsis 21:4", "Apocalipsis veintiuno, cuatro"),
         ("Jn. 3:16", "Jn. tres, dieciséis"),
-        # A period between chapter and verse is only a reference after a book.
+        # A period works as the separator too, with or without a book.
         ("Juan 3.16", "Juan tres, dieciséis"),
         ("Mt. 5.9", "Mt. cinco, nueve"),
+        ("Salmos 119.105", "Salmos ciento diecinueve, ciento cinco"),
+        ("Así que en 16.7, dice", "Así que en dieciséis, siete, dice"),
+        # A colon after the reference introduces the quotation.
+        ("Oseas 2:14: Por tanto", "Oseas dos, catorce: Por tanto"),
         # Ranges and lists of verses.
         ("Juan 3:16-18", "Juan tres, del dieciséis al dieciocho"),
         ("Juan 3:16–18", "Juan tres, del dieciséis al dieciocho"),
@@ -104,7 +108,10 @@ def test_normalize_numbers_not_numbered_books(text, expected):
         ("unos 12.500.000 habitantes", "unos doce millones quinientos mil habitantes"),
         ("unos 21,000 hombres", "unos veintiún mil hombres"),
         ("3,5 kilos", "tres coma cinco kilos"),
-        ("3.5 kilos", "tres coma cinco kilos"),
+        # In the transcripts a period before one or two digits is a
+        # reference, so only the comma is a decimal there.
+        ("3.5 kilos", "tres, cinco kilos"),
+        ("3.14159", "tres coma catorce mil ciento cincuenta y nueve"),
         ("3,05 metros", "tres coma cero cinco metros"),
         ("1.234,56", "mil doscientos treinta y cuatro coma cincuenta y seis"),
         ("1,234.56", "mil doscientos treinta y cuatro coma cincuenta y seis"),
@@ -159,6 +166,11 @@ def test_normalize_numbers_ordinals(text, expected):
         ("cuesta $1", "cuesta un dólar"),
         ("cuesta $21", "cuesta veintiún dólares"),
         ("cuesta $2,000", "cuesta dos mil dólares"),
+        ("unos $2 millones.", "unos dos millones de dólares."),
+        ("$1 millón", "un millón de dólares"),
+        ("$21 millones", "veintiún millones de dólares"),
+        ("$21 mil", "veintiún mil dólares"),
+        ("$5 mil millones", "cinco mil millones de dólares"),
     ],
 )
 def test_normalize_numbers_percent_and_dollars(text, expected):
@@ -173,6 +185,7 @@ def test_normalize_numbers_percent_and_dollars(text, expected):
         ("las 7:00", "las siete en punto"),
         ("10:45 de la mañana", "diez y cuarenta y cinco de la mañana"),
         ("a las 6:30 p.m.", "a las seis y media p.m."),
+        ("a las 6.30 de la mañana", "a las seis y media de la mañana"),
         # After a book it is a reference, whatever it looks like.
         ("Juan 10:30", "Juan diez, treinta"),
     ],
@@ -217,6 +230,53 @@ def test_normalize_numbers_odd_input_still_read(text, expected):
 @pytest.mark.parametrize("text", ["", None, "Hola a todos.", "¿Cómo están? ¡Amén!"])
 def test_normalize_numbers_text_without_digits_unchanged(text):
     assert normalize_numbers(text) == text
+
+
+# Sentences from the stored Spanish transcripts, covering the shapes that
+# turn up most there.
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Hola a todos, hoy vamos a ver Mateo 21, versículos 28 al 32.",
+         "Hola a todos, hoy vamos a ver Mateo veintiuno, versículos veintiocho al treinta y dos."),
+        ("Juan 13:1-21. Antes de la fiesta de la Pascua",
+         "Juan trece, del uno al veintiuno. Antes de la fiesta de la Pascua"),
+        ("En 1 Juan 1:8-9, dice que si decimos que no tenemos pecado",
+         "En primera de Juan uno, del ocho al nueve, dice que si decimos que no tenemos pecado"),
+        ("Romanos 5.1-5 dice, Por tanto, habiendo sido justificados por la fe",
+         "Romanos cinco, del uno al cinco dice, Por tanto, habiendo sido justificados por la fe"),
+        ("Tal vez eran 120 los que quedaron. Eso es como el 2,5% de la multitud.",
+         "Tal vez eran ciento veinte los que quedaron. Eso es como el dos coma cinco por ciento de la multitud."),
+        ("y estimo que vale lo que sea, $5,000 o $6,000.",
+         "y estimo que vale lo que sea, cinco mil dólares o seis mil dólares."),
+        ("Los cristianos han enseñado durante 2.000 años",
+         "Los cristianos han enseñado durante dos mil años"),
+        ("Así que estamos hablando más o menos de $2 millones.",
+         "Así que estamos hablando más o menos de dos millones de dólares."),
+        ("En los años 80, había unos 500 cristianos en Irán. Hoy hay alrededor de 100,000.",
+         "En los años ochenta, había unos quinientos cristianos en Irán. Hoy hay alrededor de cien mil."),
+        ("que es Mateo 20, 17-28. Y resucitará al tercer día.",
+         "que es Mateo veinte, del diecisiete al veintiocho. Y resucitará al tercer día."),
+        ("En 1984, Ronald Reagan obtuvo 525 votos electorales. Ganó en 49 estados y el 58,8% del voto popular.",
+         ("En mil novecientos ochenta y cuatro, Ronald Reagan obtuvo quinientos veinticinco votos electorales. "
+          "Ganó en cuarenta y nueve estados y el cincuenta y ocho coma ocho por ciento del voto popular.")),
+        ("El Salmo 138.6 dice: Porque el Señor es excelso",
+         "El Salmo ciento treinta y ocho, seis dice: Porque el Señor es excelso"),
+        ("llega a un punto crítico en 10.37-38, donde Jesús dice",
+         "llega a un punto crítico en diez, del treinta y siete al treinta y ocho, donde Jesús dice"),
+        ("eran aproximadamente $25.", "eran aproximadamente veinticinco dólares."),
+        ("Sí, lo que dice Daniel 7:13-14 habla de mí.",
+         "Sí, lo que dice Daniel siete, del trece al catorce habla de mí."),
+        ("En Éxodo 22, 2-3, si un ladrón es sorprendido.",
+         "En Éxodo veintidós, del dos al tres, si un ladrón es sorprendido."),
+        ("está cerca» (Mateo 4:17). Y la implicación",
+         "está cerca» (Mateo cuatro, diecisiete). Y la implicación"),
+        ("nuestro 30º presidente", "nuestro trigésimo presidente"),
+        ("¿10 para las 8? Bien, perfecto.", "¿diez para las ocho? Bien, perfecto."),
+    ],
+)
+def test_normalize_numbers_stored_transcript_sentences(text, expected):
+    assert normalize_numbers(text) == expected
 
 
 SAMPLE_SERMON = """

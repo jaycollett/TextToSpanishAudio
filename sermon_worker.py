@@ -1,3 +1,4 @@
+import html
 import os
 import sqlite3
 import logging
@@ -69,7 +70,13 @@ def synthesize_text(tts, text, output_file):
     # becomes 31 characters, so expanding afterwards could push a segment
     # past MAX_SEGMENT_CHARS, and a reference split across two segments
     # ("Juan" | "3:16") would lose the book name that says how to read it.
-    segments = split_text(normalize_numbers(text))
+    #
+    # Some stored transcripts still carry HTML entities ("Won&#39;t"), which
+    # would otherwise be read out as numbers, so they are decoded first.
+    text = normalize_numbers(html.unescape(text or ""))
+    # Logged in full so the logs can show that no digit reaches the model.
+    logging.debug("[WORKER] TTS - Normalized text: " + text)
+    segments = split_text(text)
     if not segments:
         raise ValueError("Transcription contains no speakable text")
 

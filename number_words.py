@@ -280,14 +280,19 @@ def _numbered_book(match, text):
 
 
 # ---- References and clock times: "3:16", "3:16-18", "3:16,18", "3:16-4:2" ----
+#
+# A period works as the separator too, with or without a book in front. In
+# the stored transcripts "N.N" with one or two digits after the period is
+# almost always a reference ("en 16.7, dice", "Proverbios 4.23") or a time
+# ("las 6.30 de la mañana"); decimals are written with a comma ("2,5%").
 
 _CROSS_CHAPTER_REF = re.compile(
-    r"(?<![\d.,:])(\d{1,3}):(\d{1,3})\s?[-–]\s?(\d{1,3}):(\d{1,3})(?![\d:])"
+    r"(?<![\d.,:])(\d{1,3}):(\d{1,3})\s?[-–]\s?(\d{1,3}):(\d{1,3})(?!\d|:\d)"
 )
 
 _VERSE = r"\d{1,3}(?:\s?[-–]\s?\d{1,3})?"
 _REFERENCE = re.compile(
-    rf"(?<![\d.,:])(\d{{1,3}})([:.])({_VERSE}(?:,{_VERSE})*)(?![\d:]|[.,]\d)"
+    rf"(?<![\d.,:])(\d{{1,3}})([:.])({_VERSE}(?:,{_VERSE})*)(?!\d|[:.,]\d)"
 )
 
 
@@ -299,11 +304,12 @@ def _cross_chapter_ref(match, text):
 def _reference(match, text):
     chapter, separator, verses = match.groups()
     after_book = _word_before(text, match.start()) in _BOOKS
-    if separator == "." and not after_book:
-        # Without a book name in front, "3.5" is a decimal; leave it for
-        # _PLAIN_NUMBER.
+    if separator == "." and not after_book and re.match(r"\d{3}(?!\d)", verses):
+        # "2.000" and "1.234,56" are grouped thousands; leave them for
+        # _PLAIN_NUMBER. After a book
+        # name ("Salmos 119.105") three digits are still a verse.
         return match.group()
-    if separator == ":" and not after_book and re.fullmatch(r"\d{2}", verses):
+    if not after_book and re.fullmatch(r"\d{2}", verses):
         hour, minute = int(chapter), int(verses)
         before = _word_before(text, match.start())
         if hour <= 24 and minute < 60 and (
@@ -349,11 +355,21 @@ _ORDINAL = re.compile(
 # ---- Percentages, dollar amounts and ranges ----
 
 _PERCENT = re.compile(rf"(?<![\d.,])({_NUMBER})\s?%")
-_DOLLARS = re.compile(rf"\$\s?({_NUMBER})(?![\d])")
+_DOLLARS = re.compile(
+    rf"\$\s?({_NUMBER})(?![\d])(\s+(?:mil millones|millones|millón|mil)\b)?"
+)
 
 
 def _dollars(match, text):
     words = _read_number(match.group(1))
+    if match.group(2):
+        # "$2 millones" is "dos millones de dólares", with the currency after
+        # the whole amount.
+        scale = match.group(2).strip()
+        # Mil, millón and millones are all masculine, like dólares.
+        words = _agree(words, "dólares")
+        de = " de" if scale != "mil" else ""
+        return f"{words} {scale}{de} dólares"
     if words == "uno":
         return "un dólar"
     return f"{_agree(words, 'dólares')} dólares"
