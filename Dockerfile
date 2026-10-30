@@ -11,7 +11,7 @@
 # compilers ship.
 
 # ---- Stage 1: build the virtualenv and pre-warm the TTS model ----
-FROM python:3.12-slim-trixie AS builder
+FROM python:3.14-slim-trixie AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -54,7 +54,7 @@ RUN mkdir -p /opt/tts \
     && echo y | python -c "from TTS.api import TTS; TTS('tts_models/es/css10/vits', gpu=False)"
 
 # ---- Stage 2: runtime ----
-FROM python:3.12-slim-trixie
+FROM python:3.14-slim-trixie
 
 # Runtime system dependencies only: libsndfile for `soundfile`, ffmpeg for
 # pydub's transcoding. No build-essential.
