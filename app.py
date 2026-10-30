@@ -3,6 +3,7 @@ import sqlite3
 import os
 import logging
 import threading
+import uuid
 from sermon_worker import AUDIO_DIR, DB_PATH, background_worker_loop, purge_old_jobs
 
 # Configure logging with emojis
@@ -54,34 +55,57 @@ def close_db_connection(exception):
     if db is not None:
         db.close()
 
+def _is_uuid(value):
+    """True for a UUID in its usual hyphenated form, in either case."""
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
 @app.route('/sermon', methods=['POST'])
 def submit_sermon():
     """
     Endpoint for submitting a sermon job.
-    Expects a JSON payload with 'sermon_guid' and 'transcription'.
+    Expects a JSON payload with 'sermon_guid' and 'transcription', and
+    optionally 'replace': true to requeue a job that is already complete.
     """
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            logging.error("[APP] SUBMIT_SERMON - Request body is not a JSON object.")
+            return jsonify({"error": "Request body must be a JSON object"}), 400
         sermon_guid = data.get('sermon_guid')
         transcription = data.get('transcription')
+        # Only a JSON true counts, so a stray "false" string cannot discard
+        # finished audio.
+        replace = data.get('replace') is True
         
         if not sermon_guid or not transcription:
             logging.error("[APP] SUBMIT_SERMON - Missing sermon_guid or transcription in request.")
             return jsonify({"error": "sermon_guid and transcription are required"}), 400
+        # The GUID becomes the audio file name, so anything but a plain UUID
+        # ("../x") could write outside AUDIO_DIR.
+        if not _is_uuid(sermon_guid):
+            logging.error(f"[APP] SUBMIT_SERMON - sermon_guid is not a UUID: {sermon_guid!r}")
+            return jsonify({"error": "sermon_guid must be a UUID"}), 400
         
         db = get_db()
         cursor = db.cursor()
         # A job that previously failed is requeued in place, so the caller can
         # retry a sermon without waiting for the purge to clear the old row.
+        # With "replace": true a completed job is requeued the same way. Its
+        # old MP3 stays on disk until the worker swaps the new one in: a
+        # pending job is never served for download, and the worker removes
+        # the old file if the new synthesis fails.
         cursor.execute('''
             UPDATE sermons
             SET transcription = ?, status = 'pending', audio_file = NULL,
                 created_at = CURRENT_TIMESTAMP, finished_at = NULL
-            WHERE sermon_guid = ? AND status = 'error'
-        ''', (transcription, sermon_guid))
+            WHERE sermon_guid = ? AND (status = 'error' OR (status = 'complete' AND ?))
+        ''', (transcription, sermon_guid, replace))
         if cursor.rowcount:
             db.commit()
-            logging.info(f"[APP] SUBMIT_SERMON - Errored sermon job resubmitted: {sermon_guid}")
+            logging.info(f"[APP] SUBMIT_SERMON - Sermon job resubmitted: {sermon_guid}")
             return jsonify({"message": "Sermon job submitted successfully"}), 201
 
         # Check for duplicate sermon_guid
