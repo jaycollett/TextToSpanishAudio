@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from TTS.api import TTS
 from pydub import AudioSegment  # Used for concatenating audio segments
+from text_splitter import split_text
 
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
@@ -46,56 +47,49 @@ def combine_audio_files(file_list, output_file):
         segment = AudioSegment.from_file(file)
         segment = segment.set_channels(1)  # Convert to mono
         segment = segment.set_frame_rate(22050)  # Set sample rate to 22050Hz
-        segment = segment.normalize()  # Normalize loudness
         if combined is None:
             combined = segment
         else:
             combined += segment
 
+    # Normalize loudness once over the whole sermon, so short segments are not
+    # each raised to full volume on their own.
+    combined = combined.normalize()
     # Export final audio file with 352kbps MP3 settings
     combined.export(output_file, format="mp3", bitrate="352k")
 
 def synthesize_text(tts, text, output_file):
     """
-    If text is too long, split it into smaller segments, synthesize each segment,
-    and then combine the resulting audio files into one output file.
+    Split text into segments no longer than MAX_SEGMENT_CHARS, synthesize each
+    segment, and combine the resulting audio files into one output file.
     """
-    max_chars = 1000  # Adjust this threshold based on experimentation
-    if len(text) > max_chars:
-        segments = []
-        current_segment = ""
-        # Split by period (this is a simple splitter; you can enhance it as needed)
-        for sentence in text.split('.'):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            sentence += "."  # Append the period back
-            if len(current_segment) + len(sentence) <= max_chars:
-                current_segment = f"{current_segment} {sentence}".strip() if current_segment else sentence
-            else:
-                segments.append(current_segment)
-                current_segment = sentence
-        if current_segment:
-            segments.append(current_segment)
-        
-        temp_files = []
+    segments = split_text(text)
+    if not segments:
+        raise ValueError("Transcription contains no speakable text")
+
+    # tts_to_file always writes WAV, whatever the file name says, so even a
+    # single segment goes through combine_audio_files to become a real MP3.
+    temp_files = []
+    try:
         for i, segment in enumerate(segments):
-            temp_file = output_file + f".part{i}.mp3"
-            tts.tts_to_file(text=segment, file_path=temp_file)
+            temp_file = output_file + f".part{i}.wav"
             temp_files.append(temp_file)
+            tts.tts_to_file(text=segment, file_path=temp_file)
             gc.collect()
             torch.cuda.empty_cache()
         combine_audio_files(temp_files, output_file)
-        # Remove temporary segment files.
+    finally:
+        # Remove temporary segment files, including any left by a failed segment.
         for f in temp_files:
-            os.remove(f)
-    else:
-        tts.tts_to_file(text=text, file_path=output_file)
+            if os.path.exists(f):
+                os.remove(f)
 
 def purge_old_jobs():
-    """
-    Purge completed or error jobs older than 24 hours and remove associated audio files.
-    """
+    """Purge completed or error jobs older than 24 hours and remove associated audio files."""
+    conn = None
+    purge_count = 0
+    file_failures = 0
+    db_failures = 0
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -108,14 +102,26 @@ def purge_old_jobs():
         jobs = cursor.fetchall()
         for job in jobs:
             if job["audio_file"] and os.path.exists(job["audio_file"]):
-                os.remove(job["audio_file"])
-                logging.info(f"[WORKER] PURGE - Removed audio file for sermon {job['sermon_guid']}")
-            cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-            logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
+                try:
+                    os.remove(job["audio_file"])
+                    logging.info(f"[WORKER] PURGE - Removed audio file for sermon {job['sermon_guid']}")
+                except Exception as file_err:
+                    file_failures += 1
+                    logging.error(f"[WORKER] PURGE - Failed to remove audio file for sermon {job['sermon_guid']}: {file_err}")
+            try:
+                cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
+                logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
+                purge_count += 1
+            except Exception as db_err:
+                db_failures += 1
+                logging.error(f"[WORKER] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
         conn.commit()
-        conn.close()
     except Exception as e:
         logging.error(f"[WORKER] PURGE - Error during purging old jobs: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+        logging.info(f"[WORKER] PURGE - Purge complete. Jobs purged: {purge_count}, file failures: {file_failures}, DB failures: {db_failures}")
 
 def process_pending_jobs():
     """
@@ -139,14 +145,19 @@ def process_pending_jobs():
                 logging.info(f"[WORKER] PROCESS - Completed sermon job: {sermon_guid}")
             except Exception as e:
                 logging.error(f"[WORKER] PROCESS - Error processing sermon {sermon_guid}: {e}")
-                cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
+                # finished_at lets the 24h purge remove error rows too.
+                finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute(
+                    "UPDATE sermons SET status = 'error', finished_at = ? WHERE id = ? AND status = 'pending'",
+                    (finished_at, job["id"])
+                )
                 conn.commit()
                 continue
 
             # Update the job as complete if the processing was successful.
             finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute(
-                "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ?",
+                "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ? AND status = 'pending'",
                 (finished_at, output_path, job["id"])
             )
             conn.commit()
