@@ -1,7 +1,7 @@
 import pytest
 from helpers import run_on
 
-from text_splitter import MAX_SEGMENT_CHARS, split_text
+from text_splitter import MAX_SEGMENT_CHARS, MIN_SEGMENT_CHARS, split_text
 
 
 def assert_well_formed(segments, text, max_chars=MAX_SEGMENT_CHARS):
@@ -63,15 +63,41 @@ def test_split_text_collapses_whitespace():
 def test_split_text_spanish_sentence_boundaries(text, expected):
     # A max just under the full length forces exactly one split, which must
     # land on the sentence boundary.
-    assert split_text(text, max_chars=len(text) - 1) == expected
+    assert split_text(text, max_chars=len(text) - 1, min_chars=0) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("el Sr. García habló, y luego todos cantaron", ["el Sr. García habló,", "y luego todos cantaron"]),
+        ("como dice Jn. 3:16, con mucha claridad", ["como dice Jn. 3:16,", "con mucha claridad"]),
+        ("en el capítulo 22. 3 personas vinieron, y cantaron", ["en el capítulo 22. 3 personas vinieron,", "y cantaron"]),
+    ],
+)
+def test_split_text_abbreviation_or_number_is_not_a_sentence_end(text, expected):
+    # Each case has one comma. Had the period counted as a sentence end, the
+    # split would land there instead.
+    assert split_text(text, max_chars=len(text) - 1, min_chars=0) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("primero esto – luego aquello", ["primero esto –", "luego aquello"]),
+        ("primero esto - luego aquello", ["primero esto -", "luego aquello"]),
+        ("un niño bien-educado y luego aquello", ["un niño bien-educado", "y luego aquello"]),
+    ],
+)
+def test_split_text_dashes_are_clause_boundaries(text, expected):
+    assert split_text(text, max_chars=len(text) - 1, min_chars=0) == expected
 
 
 def test_split_text_prefers_sentence_over_comma_over_word():
     text = "uno dos, tres cuatro. cinco seis, siete ocho"
     # Room for one sentence per segment: break at the period, not the commas.
-    assert split_text(text, max_chars=22) == ["uno dos, tres cuatro.", "cinco seis, siete ocho"]
+    assert split_text(text, max_chars=22, min_chars=0) == ["uno dos, tres cuatro.", "cinco seis, siete ocho"]
     # No sentence fits: fall back to the commas.
-    assert split_text(text, max_chars=14) == ["uno dos,", "tres cuatro.", "cinco seis,", "siete ocho"]
+    assert split_text(text, max_chars=14, min_chars=0) == ["uno dos,", "tres cuatro.", "cinco seis,", "siete ocho"]
 
 
 def test_split_text_comma_run_on_splits_at_commas():
@@ -82,13 +108,41 @@ def test_split_text_comma_run_on_splits_at_commas():
     assert all(s.endswith(",") for s in segments[:-1])
 
 
-def test_split_text_packs_sentences_greedily():
+def test_split_text_uses_fewest_evenly_sized_segments():
     sentence = "Hola a todos."
-    text = " ".join([sentence] * 100)
+    text = " ".join([sentence] * 100)  # 1,399 characters
     segments = split_text(text)
     assert_well_formed(segments, text)
-    # Every segment but the last is as full as whole sentences allow.
-    assert all(len(s) + 1 + len(sentence) > MAX_SEGMENT_CHARS for s in segments[:-1])
+    assert len(segments) == 4
+    assert max(map(len, segments)) - min(map(len, segments)) <= len(sentence) + 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        run_on(401),
+        run_on(805) + ". Amén. " + run_on(410) + ", y dijo. Hola a todos.",
+        run_on(1107) + ". Hola a todos. Espero que estén bien.",
+        "Hola a todos, hermanos y hermanas. " * 200,
+    ],
+)
+def test_split_text_leaves_no_short_fragments(text):
+    segments = split_text(text)
+    assert_well_formed(segments, text)
+    assert min(map(len, segments)) >= MIN_SEGMENT_CHARS, [len(s) for s in segments]
+
+
+def test_split_text_short_sentence_between_two_full_ones_is_folded_in():
+    long_sentence = run_on(380) + "."
+    text = f"{long_sentence} Sí. {long_sentence}"
+    max_chars = len(long_sentence) + 2  # neither neighbour has room for "Sí."
+    segments = split_text(text, max_chars=max_chars)
+    assert_well_formed(segments, text, max_chars=max_chars)
+    assert min(map(len, segments)) >= MIN_SEGMENT_CHARS
+
+
+def test_split_text_short_input_stays_whole():
+    assert split_text("Amén.") == ["Amén."]
 
 
 def test_split_text_never_splits_mid_word():

@@ -47,12 +47,14 @@ def combine_audio_files(file_list, output_file):
         segment = AudioSegment.from_file(file)
         segment = segment.set_channels(1)  # Convert to mono
         segment = segment.set_frame_rate(22050)  # Set sample rate to 22050Hz
-        segment = segment.normalize()  # Normalize loudness
         if combined is None:
             combined = segment
         else:
             combined += segment
 
+    # Normalize loudness once over the whole sermon, so short segments are not
+    # each raised to full volume on their own.
+    combined = combined.normalize()
     # Export final audio file with 352kbps MP3 settings
     combined.export(output_file, format="mp3", bitrate="352k")
 
@@ -84,9 +86,11 @@ def synthesize_text(tts, text, output_file):
                 os.remove(f)
 
 def purge_old_jobs():
-    """
-    Purge completed or error jobs older than 24 hours and remove associated audio files.
-    """
+    """Purge completed or error jobs older than 24 hours and remove associated audio files."""
+    conn = None
+    purge_count = 0
+    file_failures = 0
+    db_failures = 0
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -99,14 +103,26 @@ def purge_old_jobs():
         jobs = cursor.fetchall()
         for job in jobs:
             if job["audio_file"] and os.path.exists(job["audio_file"]):
-                os.remove(job["audio_file"])
-                logging.info(f"[WORKER] PURGE - Removed audio file for sermon {job['sermon_guid']}")
-            cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-            logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
+                try:
+                    os.remove(job["audio_file"])
+                    logging.info(f"[WORKER] PURGE - Removed audio file for sermon {job['sermon_guid']}")
+                except Exception as file_err:
+                    file_failures += 1
+                    logging.error(f"[WORKER] PURGE - Failed to remove audio file for sermon {job['sermon_guid']}: {file_err}")
+            try:
+                cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
+                logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
+                purge_count += 1
+            except Exception as db_err:
+                db_failures += 1
+                logging.error(f"[WORKER] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
         conn.commit()
-        conn.close()
     except Exception as e:
         logging.error(f"[WORKER] PURGE - Error during purging old jobs: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+        logging.info(f"[WORKER] PURGE - Purge complete. Jobs purged: {purge_count}, file failures: {file_failures}, DB failures: {db_failures}")
 
 def process_pending_jobs():
     """
@@ -133,7 +149,7 @@ def process_pending_jobs():
                 # finished_at lets the 24h purge remove error rows too.
                 finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(
-                    "UPDATE sermons SET status = 'error', finished_at = ? WHERE id = ?",
+                    "UPDATE sermons SET status = 'error', finished_at = ? WHERE id = ? AND status = 'pending'",
                     (finished_at, job["id"])
                 )
                 conn.commit()
@@ -142,7 +158,7 @@ def process_pending_jobs():
             # Update the job as complete if the processing was successful.
             finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute(
-                "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ?",
+                "UPDATE sermons SET status = 'complete', finished_at = ?, audio_file = ? WHERE id = ? AND status = 'pending'",
                 (finished_at, output_path, job["id"])
             )
             conn.commit()

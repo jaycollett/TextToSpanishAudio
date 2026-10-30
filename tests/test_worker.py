@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 from helpers import run_on
@@ -61,7 +62,7 @@ def test_synthesize_text_whitespace_only_raises_without_calling_tts(worker, comb
 def test_synthesize_text_failed_segment_removes_temp_files(worker, combined, tmp_path):
     tts = FakeTTS(fail_on=3)
     with pytest.raises(RuntimeError):
-        worker.synthesize_text(tts, run_on(2000), str(tmp_path / "out.mp3"))
+        worker.synthesize_text(tts, "Hola a todos, hermanos y hermanas. " * 200, str(tmp_path / "out.mp3"))
     assert list(tmp_path.iterdir()) == []
 
 
@@ -83,17 +84,105 @@ def fetch_job(db_path, guid):
     return row
 
 
-def test_process_pending_jobs_error_sets_finished_at(worker, app_module, monkeypatch, tmp_path):
-    insert_job(app_module.DB_PATH, "g-1", transcription="   ")
+@pytest.fixture
+def model(worker, app_module, monkeypatch, tmp_path):
+    """Point the worker at the test database and hand it a FakeTTS."""
+    audio_dir = tmp_path / "audiofiles"
+    audio_dir.mkdir()
+    tts = FakeTTS()
     monkeypatch.setattr(worker, "DB_PATH", app_module.DB_PATH)
-    monkeypatch.setattr(worker, "AUDIO_DIR", str(tmp_path))
-    monkeypatch.setattr(worker.TTSModelSingleton, "get_instance", classmethod(lambda cls: FakeTTS()))
+    monkeypatch.setattr(worker, "AUDIO_DIR", str(audio_dir))
+    monkeypatch.setattr(worker.TTSModelSingleton, "get_instance", classmethod(lambda cls: tts))
+    return tts
+
+
+def set_finished_at(db_path, guid, finished_at):
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE sermons SET finished_at = ? WHERE sermon_guid = ?", (finished_at, guid))
+    conn.commit()
+    conn.close()
+
+
+def test_process_pending_jobs_success_marks_complete(worker, app_module, model):
+    insert_job(app_module.DB_PATH, "g-ok", transcription="Hola a todos.")
+
+    worker.process_pending_jobs()
+
+    job = fetch_job(app_module.DB_PATH, "g-ok")
+    assert job["status"] == "complete"
+    assert job["finished_at"] is not None
+    assert job["audio_file"].endswith("g-ok.mp3")
+    assert Path(job["audio_file"]).read_bytes() == b"audio"
+    assert model.calls == ["Hola a todos."]
+
+
+def test_process_pending_jobs_error_sets_finished_at(worker, app_module, model):
+    insert_job(app_module.DB_PATH, "g-1", transcription="   ")
 
     worker.process_pending_jobs()
 
     job = fetch_job(app_module.DB_PATH, "g-1")
     assert job["status"] == "error"
     assert job["finished_at"] is not None
+
+
+def test_process_pending_jobs_does_not_overwrite_a_row_that_left_pending(worker, app_module, model, monkeypatch):
+    insert_job(app_module.DB_PATH, "g-gone")
+
+    def synthesize_then_row_changes(tts, text, output_file):
+        conn = sqlite3.connect(app_module.DB_PATH)
+        conn.execute("UPDATE sermons SET status = 'error' WHERE sermon_guid = 'g-gone'")
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(worker, "synthesize_text", synthesize_then_row_changes)
+    worker.process_pending_jobs()
+
+    job = fetch_job(app_module.DB_PATH, "g-gone")
+    assert job["status"] == "error"
+    assert job["audio_file"] is None
+
+
+def test_purge_old_jobs_deletes_error_row_once_finished(worker, app_module, model):
+    insert_job(app_module.DB_PATH, "g-old", status="error")
+    insert_job(app_module.DB_PATH, "g-recent", status="error")
+    set_finished_at(app_module.DB_PATH, "g-old", "2026-01-01 00:00:00")
+    set_finished_at(app_module.DB_PATH, "g-recent", "2999-01-01 00:00:00")
+
+    worker.purge_old_jobs()
+
+    assert fetch_job(app_module.DB_PATH, "g-old") is None
+    assert fetch_job(app_module.DB_PATH, "g-recent") is not None
+
+
+def test_purge_endpoint_uses_worker_purge(client, app_module, model):
+    insert_job(app_module.DB_PATH, "g-old", status="complete")
+    set_finished_at(app_module.DB_PATH, "g-old", "2026-01-01 00:00:00")
+
+    assert client.post("/purge").status_code == 200
+    assert fetch_job(app_module.DB_PATH, "g-old") is None
+
+
+def test_init_db_stamps_legacy_error_rows_so_they_purge(app_module):
+    insert_job(app_module.DB_PATH, "g-legacy", status="error")
+    insert_job(app_module.DB_PATH, "g-pending")
+
+    app_module.init_db()
+    app_module.init_db()  # idempotent
+
+    assert fetch_job(app_module.DB_PATH, "g-legacy")["finished_at"] is not None
+    assert fetch_job(app_module.DB_PATH, "g-pending")["finished_at"] is None
+
+
+def test_requeued_job_is_synthesized_from_new_transcription(worker, client, app_module, model):
+    insert_job(app_module.DB_PATH, "g-retry", status="error", transcription="texto viejo.")
+
+    resp = client.post("/sermon", json={"sermon_guid": "g-retry", "transcription": "texto nuevo."})
+    assert resp.status_code == 201
+    worker.process_pending_jobs()
+
+    assert model.calls == ["texto nuevo."]
+    assert fetch_job(app_module.DB_PATH, "g-retry")["status"] == "complete"
 
 
 def test_submit_sermon_errored_guid_is_requeued(client, app_module):

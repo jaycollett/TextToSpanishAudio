@@ -3,8 +3,7 @@ import sqlite3
 import os
 import logging
 import threading
-from datetime import datetime, timedelta
-from sermon_worker import background_worker_loop
+from sermon_worker import background_worker_loop, purge_old_jobs
 
 # Configure logging with emojis
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,51 +43,13 @@ def init_db():
                 finished_at TIMESTAMP DEFAULT NULL
             )
         ''')
+        # Error rows written before the worker recorded finished_at would never
+        # match the purge. Stamping them now lets the purge clear them in 24h.
+        cursor.execute(
+            "UPDATE sermons SET finished_at = CURRENT_TIMESTAMP WHERE status = 'error' AND finished_at IS NULL"
+        )
         db.commit()
     logging.info("[APP] INIT_DB - Database initialized successfully.")
-
-def purge_old_jobs():
-    """Purge completed or error jobs older than 24 hours and remove associated audio files."""
-    db = None
-    purge_count = 0
-    file_failures = 0
-    db_failures = 0
-    try:
-        db = get_db()
-        cursor = db.cursor()
-        threshold = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            "SELECT id, sermon_guid, audio_file FROM sermons WHERE (status IN ('complete', 'error')) AND finished_at <= ?",
-            (threshold,)
-        )
-        jobs = cursor.fetchall()
-        for job in jobs:
-            file_deleted = True
-            if job["audio_file"] and os.path.exists(job["audio_file"]):
-                try:
-                    os.remove(job["audio_file"])
-                    logging.info(f"[APP] PURGE - Removed audio file for sermon {job['sermon_guid']}")
-                except Exception as file_err:
-                    file_failures += 1
-                    file_deleted = False
-                    logging.error(f"[APP] PURGE - Failed to remove audio file for sermon {job['sermon_guid']}: {file_err}")
-            try:
-                cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-                logging.info(f"[APP] PURGE - Purged job {job['sermon_guid']} from database")
-                purge_count += 1
-            except Exception as db_err:
-                db_failures += 1
-                logging.error(f"[APP] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
-        db.commit()
-    except Exception as e:
-        logging.error(f"[APP] PURGE - Error during purging old jobs: {e}")
-    finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception as e:
-                logging.error(f"[APP] PURGE - Error closing DB: {e}")
-        logging.info(f"[APP] PURGE - Purge complete. Jobs purged: {purge_count}, file failures: {file_failures}, DB failures: {db_failures}")
 
 @app.teardown_appcontext
 def close_db_connection(exception):
