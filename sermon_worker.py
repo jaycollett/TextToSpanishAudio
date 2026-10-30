@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from TTS.api import TTS
 from pydub import AudioSegment  # Used for concatenating audio segments
 from text_splitter import split_text
+from number_words import normalize_numbers
 
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
@@ -60,10 +61,15 @@ def combine_audio_files(file_list, output_file):
 
 def synthesize_text(tts, text, output_file):
     """
-    Split text into segments no longer than MAX_SEGMENT_CHARS, synthesize each
-    segment, and combine the resulting audio files into one output file.
+    Write numbers out as words, split the text into segments no longer than
+    MAX_SEGMENT_CHARS, synthesize each segment, and combine the resulting
+    audio files into one output file.
     """
-    segments = split_text(text)
+    # Numbers are written out before splitting, not per segment: "1995"
+    # becomes 31 characters, so expanding afterwards could push a segment
+    # past MAX_SEGMENT_CHARS, and a reference split across two segments
+    # ("Juan" | "3:16") would lose the book name that says how to read it.
+    segments = split_text(normalize_numbers(text))
     if not segments:
         raise ValueError("Transcription contains no speakable text")
 
