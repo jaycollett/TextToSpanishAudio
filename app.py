@@ -58,12 +58,16 @@ def close_db_connection(exception):
 def submit_sermon():
     """
     Endpoint for submitting a sermon job.
-    Expects a JSON payload with 'sermon_guid' and 'transcription'.
+    Expects a JSON payload with 'sermon_guid' and 'transcription', and
+    optionally 'replace': true to requeue a job that is already complete.
     """
     try:
         data = request.get_json()
         sermon_guid = data.get('sermon_guid')
         transcription = data.get('transcription')
+        # Only a JSON true counts, so a stray "false" string cannot discard
+        # finished audio.
+        replace = data.get('replace') is True
         
         if not sermon_guid or not transcription:
             logging.error("[APP] SUBMIT_SERMON - Missing sermon_guid or transcription in request.")
@@ -83,6 +87,34 @@ def submit_sermon():
             db.commit()
             logging.info(f"[APP] SUBMIT_SERMON - Errored sermon job resubmitted: {sermon_guid}")
             return jsonify({"message": "Sermon job submitted successfully"}), 201
+
+        # With "replace": true, a finished job is requeued the same way, and its
+        # old MP3 is deleted. The row is updated first and committed only after
+        # the file is gone: the worker cannot see the pending row until then,
+        # and it writes the new audio to the same path.
+        if replace:
+            cursor.execute(
+                "SELECT audio_file FROM sermons WHERE sermon_guid = ? AND status = 'complete'",
+                (sermon_guid,)
+            )
+            job = cursor.fetchone()
+            if job:
+                cursor.execute('''
+                    UPDATE sermons
+                    SET transcription = ?, status = 'pending', audio_file = NULL,
+                        created_at = CURRENT_TIMESTAMP, finished_at = NULL
+                    WHERE sermon_guid = ? AND status = 'complete'
+                ''', (transcription, sermon_guid))
+                if cursor.rowcount:
+                    try:
+                        if job["audio_file"] and os.path.exists(job["audio_file"]):
+                            os.remove(job["audio_file"])
+                    except OSError:
+                        db.rollback()
+                        raise
+                    db.commit()
+                    logging.info(f"[APP] SUBMIT_SERMON - Completed sermon job replaced: {sermon_guid}")
+                    return jsonify({"message": "Sermon job submitted successfully"}), 201
 
         # Check for duplicate sermon_guid
         cursor.execute("SELECT id FROM sermons WHERE sermon_guid = ?", (sermon_guid,))
