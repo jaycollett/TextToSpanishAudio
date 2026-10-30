@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from TTS.api import TTS
 from pydub import AudioSegment  # Used for concatenating audio segments
+from text_splitter import split_text
 
 # Global configuration values.
 DB_PATH = os.getenv("DB_PATH", "/data/jobs.db")
@@ -57,40 +58,30 @@ def combine_audio_files(file_list, output_file):
 
 def synthesize_text(tts, text, output_file):
     """
-    If text is too long, split it into smaller segments, synthesize each segment,
-    and then combine the resulting audio files into one output file.
+    Split text into segments no longer than MAX_SEGMENT_CHARS, synthesize each
+    segment, and combine the resulting audio files into one output file.
     """
-    max_chars = 1000  # Adjust this threshold based on experimentation
-    if len(text) > max_chars:
-        segments = []
-        current_segment = ""
-        # Split by period (this is a simple splitter; you can enhance it as needed)
-        for sentence in text.split('.'):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            sentence += "."  # Append the period back
-            if len(current_segment) + len(sentence) <= max_chars:
-                current_segment = f"{current_segment} {sentence}".strip() if current_segment else sentence
-            else:
-                segments.append(current_segment)
-                current_segment = sentence
-        if current_segment:
-            segments.append(current_segment)
-        
-        temp_files = []
+    segments = split_text(text)
+    if not segments:
+        raise ValueError("Transcription contains no speakable text")
+    if len(segments) == 1:
+        tts.tts_to_file(text=segments[0], file_path=output_file)
+        return
+
+    temp_files = []
+    try:
         for i, segment in enumerate(segments):
             temp_file = output_file + f".part{i}.mp3"
-            tts.tts_to_file(text=segment, file_path=temp_file)
             temp_files.append(temp_file)
+            tts.tts_to_file(text=segment, file_path=temp_file)
             gc.collect()
             torch.cuda.empty_cache()
         combine_audio_files(temp_files, output_file)
-        # Remove temporary segment files.
+    finally:
+        # Remove temporary segment files, including any left by a failed segment.
         for f in temp_files:
-            os.remove(f)
-    else:
-        tts.tts_to_file(text=text, file_path=output_file)
+            if os.path.exists(f):
+                os.remove(f)
 
 def purge_old_jobs():
     """
@@ -139,7 +130,12 @@ def process_pending_jobs():
                 logging.info(f"[WORKER] PROCESS - Completed sermon job: {sermon_guid}")
             except Exception as e:
                 logging.error(f"[WORKER] PROCESS - Error processing sermon {sermon_guid}: {e}")
-                cursor.execute("UPDATE sermons SET status = 'error' WHERE id = ?", (job["id"],))
+                # finished_at lets the 24h purge remove error rows too.
+                finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute(
+                    "UPDATE sermons SET status = 'error', finished_at = ? WHERE id = ?",
+                    (finished_at, job["id"])
+                )
                 conn.commit()
                 continue
 

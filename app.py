@@ -114,6 +114,19 @@ def submit_sermon():
         
         db = get_db()
         cursor = db.cursor()
+        # A job that previously failed is requeued in place, so the caller can
+        # retry a sermon without waiting for the purge to clear the old row.
+        cursor.execute('''
+            UPDATE sermons
+            SET transcription = ?, status = 'pending', audio_file = NULL,
+                created_at = CURRENT_TIMESTAMP, finished_at = NULL
+            WHERE sermon_guid = ? AND status = 'error'
+        ''', (transcription, sermon_guid))
+        if cursor.rowcount:
+            db.commit()
+            logging.info(f"[APP] SUBMIT_SERMON - Errored sermon job resubmitted: {sermon_guid}")
+            return jsonify({"message": "Sermon job submitted successfully"}), 201
+
         # Check for duplicate sermon_guid
         cursor.execute("SELECT id FROM sermons WHERE sermon_guid = ?", (sermon_guid,))
         if cursor.fetchone():
