@@ -80,10 +80,14 @@ def synthesize_text(tts, text, output_file):
             tts.tts_to_file(text=segment, file_path=temp_file)
             gc.collect()
             torch.cuda.empty_cache()
-        combine_audio_files(temp_files, output_file)
+        # Written beside the target and renamed over it, so <guid>.mp3 is
+        # always either the previous complete file or the new one, never half
+        # written. A replaced job keeps its old file until this point.
+        combine_audio_files(temp_files, output_file + ".tmp")
+        os.replace(output_file + ".tmp", output_file)
     finally:
         # Remove temporary segment files, including any left by a failed segment.
-        for f in temp_files:
+        for f in temp_files + [output_file + ".tmp"]:
             if os.path.exists(f):
                 os.remove(f)
 
@@ -103,7 +107,26 @@ def purge_old_jobs():
             (threshold,)
         )
         jobs = cursor.fetchall()
+        purged = []
         for job in jobs:
+            try:
+                # The same conditions again: a job resubmitted since the SELECT
+                # is pending now and must survive the purge.
+                cursor.execute(
+                    "DELETE FROM sermons WHERE id = ? AND status IN ('complete', 'error') AND finished_at <= ?",
+                    (job["id"], threshold)
+                )
+                if cursor.rowcount == 1:
+                    logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
+                    purge_count += 1
+                    purged.append(job)
+            except Exception as db_err:
+                db_failures += 1
+                logging.error(f"[WORKER] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
+        conn.commit()
+        # Files go only after the deletes are committed, and only for rows
+        # that were actually deleted.
+        for job in purged:
             if job["audio_file"] and os.path.exists(job["audio_file"]):
                 try:
                     os.remove(job["audio_file"])
@@ -111,14 +134,6 @@ def purge_old_jobs():
                 except Exception as file_err:
                     file_failures += 1
                     logging.error(f"[WORKER] PURGE - Failed to remove audio file for sermon {job['sermon_guid']}: {file_err}")
-            try:
-                cursor.execute("DELETE FROM sermons WHERE id = ?", (job["id"],))
-                logging.info(f"[WORKER] PURGE - Purged job {job['sermon_guid']} from database")
-                purge_count += 1
-            except Exception as db_err:
-                db_failures += 1
-                logging.error(f"[WORKER] PURGE - Failed to remove DB entry for sermon {job['sermon_guid']}: {db_err}")
-        conn.commit()
     except Exception as e:
         logging.error(f"[WORKER] PURGE - Error during purging old jobs: {e}")
     finally:
@@ -148,6 +163,13 @@ def process_pending_jobs():
                 logging.info(f"[WORKER] PROCESS - Completed sermon job: {sermon_guid}")
             except Exception as e:
                 logging.error(f"[WORKER] PROCESS - Error processing sermon {sermon_guid}: {e}")
+                # A replaced job still has its previous MP3 at this path. An
+                # error row must not leave old audio behind.
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                except OSError as file_err:
+                    logging.error(f"[WORKER] PROCESS - Failed to remove stale audio for sermon {sermon_guid}: {file_err}")
                 # finished_at lets the 24h purge remove error rows too.
                 finished_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(

@@ -14,6 +14,9 @@ from helpers import run_on
 # predates that module.
 SAFE_MAX = 400
 
+# POST /sermon only accepts a UUID for sermon_guid.
+GUID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
+
 
 class FakeTTS:
     """Records every tts_to_file() call and fails the way VITS does on empty input."""
@@ -186,27 +189,27 @@ def test_init_db_stamps_legacy_error_rows_so_they_purge(app_module):
 
 
 def test_requeued_job_is_synthesized_from_new_transcription(worker, client, app_module, model):
-    insert_job(app_module.DB_PATH, "g-retry", status="error", transcription="texto viejo.")
+    insert_job(app_module.DB_PATH, GUID, status="error", transcription="texto viejo.")
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-retry", "transcription": "texto nuevo."})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "texto nuevo."})
     assert resp.status_code == 201
     worker.process_pending_jobs()
 
     assert model.calls == ["texto nuevo."]
-    assert fetch_job(app_module.DB_PATH, "g-retry")["status"] == "complete"
+    assert fetch_job(app_module.DB_PATH, GUID)["status"] == "complete"
 
 
 def test_submit_sermon_errored_guid_is_requeued(client, app_module):
-    insert_job(app_module.DB_PATH, "g-err", status="error", transcription="vieja")
+    insert_job(app_module.DB_PATH, GUID, status="error", transcription="vieja")
     conn = sqlite3.connect(app_module.DB_PATH)
     conn.execute("UPDATE sermons SET finished_at = '2026-01-01 00:00:00' WHERE sermon_guid = 'g-err'")
     conn.commit()
     conn.close()
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-err", "transcription": "nueva"})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "nueva"})
 
     assert resp.status_code == 201
-    job = fetch_job(app_module.DB_PATH, "g-err")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "pending"
     assert job["transcription"] == "nueva"
     assert job["finished_at"] is None
@@ -215,12 +218,12 @@ def test_submit_sermon_errored_guid_is_requeued(client, app_module):
 
 @pytest.mark.parametrize("status", ["pending", "complete"])
 def test_submit_sermon_existing_non_error_guid_conflicts(client, app_module, status):
-    insert_job(app_module.DB_PATH, "g-dup", status=status, transcription="original")
+    insert_job(app_module.DB_PATH, GUID, status=status, transcription="original")
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-dup", "transcription": "otra"})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "otra"})
 
     assert resp.status_code == 409
-    job = fetch_job(app_module.DB_PATH, "g-dup")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == status
     assert job["transcription"] == "original"
 
@@ -236,112 +239,174 @@ def complete_job(db_path, guid, audio_file):
     conn.close()
 
 
-def test_submit_sermon_replace_requeues_complete_job(client, app_module, tmp_path):
-    audio = tmp_path / "g-done.mp3"
+@pytest.fixture
+def finished(app_module, tmp_path):
+    """A completed job whose MP3 is on disk; returns the MP3 path."""
+    audio = tmp_path / f"{GUID}.mp3"
     audio.write_bytes(b"old audio")
-    insert_job(app_module.DB_PATH, "g-done", transcription="vieja")
-    complete_job(app_module.DB_PATH, "g-done", str(audio))
+    insert_job(app_module.DB_PATH, GUID, transcription="vieja")
+    complete_job(app_module.DB_PATH, GUID, str(audio))
+    return audio
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-done", "transcription": "nueva", "replace": True})
+
+def test_submit_sermon_replace_requeues_complete_job(client, app_module, finished):
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "nueva", "replace": True})
 
     assert resp.status_code == 201
-    assert not audio.exists()
-    job = fetch_job(app_module.DB_PATH, "g-done")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "pending"
     assert job["transcription"] == "nueva"
     assert job["audio_file"] is None
     assert job["finished_at"] is None
+    # The old file waits for the worker to swap the new one in, but a pending
+    # job is never served.
+    assert finished.exists()
+    assert client.get(f"/download/{GUID}").status_code == 400
+    assert "download_url" not in client.get(f"/status/{GUID}").get_json()
 
 
-def test_submit_sermon_replace_with_audio_already_gone_still_requeues(client, app_module, tmp_path):
-    insert_job(app_module.DB_PATH, "g-done", transcription="vieja")
-    complete_job(app_module.DB_PATH, "g-done", str(tmp_path / "missing.mp3"))
+def test_submit_sermon_replace_commit_failure_keeps_complete_job(client, app_module, finished, monkeypatch):
+    real_get_db = app_module.get_db
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-done", "transcription": "nueva", "replace": True})
+    def get_db():
+        db = real_get_db()
+        return CommitFails(db)
 
-    assert resp.status_code == 201
-    assert fetch_job(app_module.DB_PATH, "g-done")["status"] == "pending"
+    class CommitFails:
+        def __init__(self, db):
+            self._db = db
 
+        def __getattr__(self, name):
+            return getattr(self._db, name)
 
-def test_submit_sermon_replace_keeps_row_when_audio_cannot_be_deleted(client, app_module, tmp_path, monkeypatch):
-    audio = tmp_path / "g-done.mp3"
-    audio.write_bytes(b"old audio")
-    insert_job(app_module.DB_PATH, "g-done", transcription="vieja")
-    complete_job(app_module.DB_PATH, "g-done", str(audio))
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
 
-    def refuse(path):
-        raise PermissionError(path)
-
-    monkeypatch.setattr(app_module.os, "remove", refuse)
-    resp = client.post("/sermon", json={"sermon_guid": "g-done", "transcription": "nueva", "replace": True})
+    monkeypatch.setattr(app_module, "get_db", get_db)
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "nueva", "replace": True})
 
     assert resp.status_code == 500
-    job = fetch_job(app_module.DB_PATH, "g-done")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "complete"
     assert job["transcription"] == "vieja"
-    assert job["audio_file"] == str(audio)
+    assert job["audio_file"] == str(finished)
+    assert finished.read_bytes() == b"old audio"
 
 
 @pytest.mark.parametrize("replace", [None, False, "true", 1])
-def test_submit_sermon_complete_job_without_replace_true_conflicts(client, app_module, tmp_path, replace):
-    audio = tmp_path / "g-done.mp3"
-    audio.write_bytes(b"old audio")
-    insert_job(app_module.DB_PATH, "g-done", transcription="vieja")
-    complete_job(app_module.DB_PATH, "g-done", str(audio))
-    payload = {"sermon_guid": "g-done", "transcription": "nueva"}
+def test_submit_sermon_complete_job_without_replace_true_conflicts(client, app_module, finished, replace):
+    payload = {"sermon_guid": GUID, "transcription": "nueva"}
     if replace is not None:
         payload["replace"] = replace
 
     resp = client.post("/sermon", json=payload)
 
     assert resp.status_code == 409
-    assert audio.exists()
-    job = fetch_job(app_module.DB_PATH, "g-done")
+    assert finished.exists()
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "complete"
     assert job["transcription"] == "vieja"
 
 
 def test_submit_sermon_replace_leaves_pending_job_alone(client, app_module):
-    insert_job(app_module.DB_PATH, "g-busy", status="pending", transcription="original")
+    insert_job(app_module.DB_PATH, GUID, status="pending", transcription="original")
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-busy", "transcription": "otra", "replace": True})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "otra", "replace": True})
 
     assert resp.status_code == 409
-    assert fetch_job(app_module.DB_PATH, "g-busy")["transcription"] == "original"
+    assert fetch_job(app_module.DB_PATH, GUID)["transcription"] == "original"
 
 
 @pytest.mark.parametrize("status", ["error", None])
 def test_submit_sermon_replace_on_error_or_new_guid_behaves_as_before(client, app_module, status):
     if status:
-        insert_job(app_module.DB_PATH, "g-x", status=status, transcription="vieja")
+        insert_job(app_module.DB_PATH, GUID, status=status, transcription="vieja")
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-x", "transcription": "nueva", "replace": True})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "nueva", "replace": True})
 
     assert resp.status_code == 201
-    job = fetch_job(app_module.DB_PATH, "g-x")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "pending"
     assert job["transcription"] == "nueva"
 
 
 def test_replaced_job_is_synthesized_from_new_transcription(worker, client, app_module, model):
-    insert_job(app_module.DB_PATH, "g-redo", transcription="texto viejo.")
+    insert_job(app_module.DB_PATH, GUID, transcription="texto viejo.")
     worker.process_pending_jobs()
-    assert fetch_job(app_module.DB_PATH, "g-redo")["status"] == "complete"
+    old = fetch_job(app_module.DB_PATH, GUID)
+    assert old["status"] == "complete"
 
-    resp = client.post("/sermon", json={"sermon_guid": "g-redo", "transcription": "texto nuevo.", "replace": True})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "texto nuevo.", "replace": True})
     assert resp.status_code == 201
     worker.process_pending_jobs()
 
     assert model.calls == ["texto viejo.", "texto nuevo."]
-    job = fetch_job(app_module.DB_PATH, "g-redo")
+    job = fetch_job(app_module.DB_PATH, GUID)
     assert job["status"] == "complete"
-    assert job["audio_file"] and Path(job["audio_file"]).read_bytes() == b"audio"
+    assert job["audio_file"] == old["audio_file"]
+    assert Path(job["audio_file"]).read_bytes() == b"audio"
+
+
+def test_replaced_job_swaps_new_audio_in_atomically(worker, client, app_module, model, monkeypatch):
+    insert_job(app_module.DB_PATH, GUID, transcription="texto viejo.")
+    worker.process_pending_jobs()
+    target = Path(fetch_job(app_module.DB_PATH, GUID)["audio_file"])
+    target.write_bytes(b"old audio")
+    client.post("/sermon", json={"sermon_guid": GUID, "transcription": "texto nuevo.", "replace": True})
+
+    seen = []
+
+    def watch_replace(src, dst):
+        # While the new MP3 is being written, the old one is still whole at
+        # the final path; the new one lands with a single rename.
+        seen.append((Path(src).name, Path(dst).name, target.read_bytes(), Path(src).read_bytes()))
+        real_replace(src, dst)
+
+    real_replace = worker.os.replace
+    monkeypatch.setattr(worker.os, "replace", watch_replace)
+    worker.process_pending_jobs()
+
+    assert seen == [(f"{GUID}.mp3.tmp", f"{GUID}.mp3", b"old audio", b"audio")]
+    assert target.read_bytes() == b"audio"
+    assert sorted(p.name for p in target.parent.iterdir()) == [f"{GUID}.mp3"]
+
+
+def test_replaced_job_that_fails_removes_old_audio(worker, client, app_module, model):
+    insert_job(app_module.DB_PATH, GUID, transcription="texto viejo.")
+    worker.process_pending_jobs()
+    target = Path(fetch_job(app_module.DB_PATH, GUID)["audio_file"])
+    assert target.exists()
+
+    # Whitespace only: synthesize_text raises before any audio is written.
+    client.post("/sermon", json={"sermon_guid": GUID, "transcription": "   ", "replace": True})
+    worker.process_pending_jobs()
+
+    job = fetch_job(app_module.DB_PATH, GUID)
+    assert job["status"] == "error"
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("guid", ["../x", "g-new", "../../etc/passwd", "{" + GUID + "}", "urn:uuid:" + GUID, 42])
+def test_submit_sermon_rejects_guid_that_is_not_a_uuid(client, app_module, guid):
+    resp = client.post("/sermon", json={"sermon_guid": guid, "transcription": "Hola."})
+    assert resp.status_code == 400
+
+
+def test_submit_sermon_accepts_uppercase_uuid(client, app_module):
+    resp = client.post("/sermon", json={"sermon_guid": GUID.upper(), "transcription": "Hola."})
+    assert resp.status_code == 201
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", '"texto"', "null", "no es json"])
+def test_submit_sermon_body_not_a_json_object_is_400(client, app_module, body):
+    resp = client.post("/sermon", data=body, content_type="application/json")
+    assert resp.status_code == 400
 
 
 def test_submit_sermon_new_guid_created(client, app_module):
-    resp = client.post("/sermon", json={"sermon_guid": "g-new", "transcription": "Hola."})
+    resp = client.post("/sermon", json={"sermon_guid": GUID, "transcription": "Hola."})
     assert resp.status_code == 201
-    assert fetch_job(app_module.DB_PATH, "g-new")["status"] == "pending"
+    assert fetch_job(app_module.DB_PATH, GUID)["status"] == "pending"
 
 
 class WavTTS:
