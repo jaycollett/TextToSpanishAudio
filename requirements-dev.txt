@@ -1,0 +1,4 @@
+# Test-only dependencies, on top of requirements.txt. Not installed in the
+# Docker image.
+pytest==9.2.0
+hypothesis==6.170.14

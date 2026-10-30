@@ -31,6 +31,27 @@ jobs:
           # release to rebuild.
           fetch-depth: 0
 
+      # Tests gate a release build. Scheduled and manual runs rebuild a tag
+      # that already passed them at release, so they skip this.
+      - name: Set up Python
+        if: github.event_name == 'release'
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Run tests
+        if: github.event_name == 'release'
+        run: |
+          set -eu
+          # ffmpeg lets the MP3 export tests run instead of skipping.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          # coqui-tts pulls in torch, which the tests do not need: conftest.py
+          # stubs torch and TTS. Everything else is installed as pinned.
+          grep -v '^coqui-tts' requirements.txt > "${RUNNER_TEMP}/test-requirements.txt"
+          python -m pip install -r "${RUNNER_TEMP}/test-requirements.txt" -r requirements-dev.txt
+          python -m pytest -q
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.8.0
 

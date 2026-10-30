@@ -80,6 +80,57 @@ def test_synthesize_text_failed_segment_removes_temp_files(worker, combined, tmp
     assert list(tmp_path.iterdir()) == []
 
 
+def test_synthesize_text_no_digit_reaches_tts(worker, combined, tmp_path):
+    tts = FakeTTS()
+    text = "Abran en Juan 3:16-18. En 1995, 2.000 personas; el 50%. " * 20
+    worker.synthesize_text(tts, text, str(tmp_path / "out.mp3"))
+    assert tts.calls
+    assert not any(c.isdigit() for call in tts.calls for c in call)
+    assert all(len(c) <= SAFE_MAX for c in tts.calls)
+    assert tts.calls[0].startswith("Abran en Juan tres, del dieciséis al dieciocho.")
+
+
+def test_synthesize_text_decodes_html_entities(worker, combined, tmp_path):
+    # Otherwise "&#39;" would be read as "treinta y nueve".
+    tts = FakeTTS()
+    worker.synthesize_text(tts, "la canción I Won&#39;t Back Down, &quot;dijo&quot;", str(tmp_path / "out.mp3"))
+    assert tts.calls == ["la canción I Won't Back Down, \"dijo\""]
+
+
+def test_synthesize_text_falls_back_when_normalization_fails(worker, combined, tmp_path, monkeypatch, caplog):
+    def broken(text):
+        raise KeyError("rule bug")
+
+    monkeypatch.setattr(worker, "normalize_numbers", broken)
+    tts = FakeTTS()
+    with caplog.at_level("WARNING"):
+        worker.synthesize_text(tts, "Juan 3:16 y " + "9" * 20, str(tmp_path / "out.mp3"))
+
+    assert "Number normalization failed" in caplog.text
+    assert tts.calls[0].startswith("Juan tres:dieciséis y nueve nueve")
+    assert not any(c.isdigit() for call in tts.calls for c in call)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Won&amp;#39;t", "Won't"),
+        ("el &amp;#49; de enero", "el uno de enero"),
+        ("&amp;amp;quot;hola&amp;amp;quot;", '"hola"'),
+    ],
+)
+def test_synthesize_text_decodes_double_encoded_entities(worker, combined, tmp_path, text, expected):
+    tts = FakeTTS()
+    worker.synthesize_text(tts, text, str(tmp_path / "out.mp3"))
+    assert tts.calls == [expected]
+
+
+def test_synthesize_text_logs_normalized_text(worker, combined, tmp_path, caplog):
+    with caplog.at_level("DEBUG"):
+        worker.synthesize_text(FakeTTS(), "Génesis capítulo 1.", str(tmp_path / "out.mp3"))
+    assert "Normalized text: Génesis capítulo uno." in caplog.text
+
+
 def insert_job(db_path, guid, status="pending", transcription="Hola a todos."):
     conn = sqlite3.connect(db_path)
     conn.execute(
