@@ -1,0 +1,21 @@
+# transformers is pinned to >=4.47,<4.50 in the Dockerfile because coqui-tts
+# 0.26.0 imports APIs that later transformers releases removed
+# (pytorch_utils.isin_mps_friendly, top-level BeamSearchScorer). The fixed
+# releases below are all 5.x, which coqui-tts 0.26.0 cannot import.
+#
+# None of these is reachable here. The service only runs the Coqui VITS model
+# tts_models/es/css10/vits, which is not a Hugging Face model: nothing loads a
+# model or tokenizer through transformers, trust_remote_code is never used,
+# and save_pretrained is never called. transformers is only imported at module
+# scope by coqui-tts.
+#
+# Planned removal: upgrade to coqui-tts 0.28 (transformers >= 5.10) once the
+# NVIDIA driver on the TTS host has been checked against the newer torch CUDA
+# wheels. Delete these entries in that change.
+
+# transformers: remote code execution (fixed in 5.3.0)
+CVE-2026-4372
+# transformers: trust_remote_code setting can be overridden (fixed in 5.5.0)
+CVE-2026-5241
+# transformers: save_pretrained path traversal via chat template names (fixed in 5.10.0)
+CVE-2026-9856
