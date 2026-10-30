@@ -172,7 +172,7 @@ def _word_before(text, index):
     return _plain(match.group(1)) if match else ""
 
 
-_NEXT_WORD = re.compile(r"\s*(\w+)")
+_NEXT_WORD = re.compile(r"\s*([^\W\d_]+)")
 
 
 def _word_after(text, index):
@@ -271,12 +271,14 @@ def _agree(words, noun):
 
 # ---- Numbered books: "1 Corintios", "2ª Timoteo", "II Reyes", "1 Co." ----
 
-_BOOK_NUMBER = r"(?:[123]|III|II|I)(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?"
+# Roman numerals are matched case-sensitively even though the pattern is not:
+# a lowercase "i" is not a book number.
+_BOOK_NUMBER = r"(?:[123]|(?-i:III|II|I))(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?"
 _NUMBERED_BOOK = re.compile(
     # "1 y 2 Samuel", "1, 2 y 3 Juan": the earlier numbers are part of the
     # same name, so they are matched along with it.
-    rf"(?<![\w:.,])(?P<list>(?:{_BOOK_NUMBER}\s*,\s*)*{_BOOK_NUMBER}\s+[yo]\s+)?"
-    r"(?P<n>[123]|III|II|I)(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?\s+"
+    rf"(?<![\w:.,])(?P<list>(?:{_BOOK_NUMBER}\s*,\s*)*{_BOOK_NUMBER}\s+[yoe]\s+)?"
+    r"(?P<n>[123]|(?-i:III|II|I))(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?\s+"
     # The keys are unaccented, so the accented spellings are added here.
     r"(?P<book>"
     + "|".join(sorted({*_NUMBERED_BOOKS, "crónicas", "crón"}, key=len, reverse=True))
@@ -297,7 +299,7 @@ def _numbered_book(match, text):
     if name[0].islower() and _plain(name) not in _LOWERCASE_BOOKS:
         return match.group()
     entry = _NUMBERED_BOOKS.get(_plain(name))
-    earlier = re.findall(r"[123]|III|II|I", match.group("list") or "", re.IGNORECASE)
+    earlier = re.findall(r"[123]|III|II|I", match.group("list") or "")
     positions = [_BOOK_ORDINALS.get(n.lower()) for n in [*earlier, number]]
     if entry is None or None in positions:
         # IGNORECASE also matches "ſ" for "s" and "İ" for "I", which the
@@ -306,7 +308,11 @@ def _numbered_book(match, text):
     book, gender = entry
     ordinals = [_BOOK_ORDINAL_WORDS[(p, gender)] for p in positions]
     if len(ordinals) > 1:
-        conjunction = re.search(r"\s([yo])\s+$", match.group("list")).group(1)
+        # The pattern ignores case, so "1 Y 2 Samuel" gets here with a capital.
+        conjunction = re.search(r"\s([yoe])\s+$", match.group("list"), re.IGNORECASE).group(1).lower()
+        # "e" is "y" before an i sound ("I e II"); spoken as ordinals, the
+        # next word starts with p, s or t, so it is "y" again.
+        conjunction = "o" if conjunction == "o" else "y"
         ordinals = [", ".join(ordinals[:-1]) + f" {conjunction} " + ordinals[-1]]
     # The period after an abbreviation is dropped along with it: "1 Co. 13"
     # is not the end of a sentence. After the full name ("en 1 Juan. Y")

@@ -43,6 +43,9 @@ jobs:
         if: github.event_name == 'release'
         run: |
           set -eu
+          # ffmpeg lets the MP3 export tests run instead of skipping.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
           # coqui-tts pulls in torch, which the tests do not need: conftest.py
           # stubs torch and TTS. Everything else is installed as pinned.
           grep -v '^coqui-tts' requirements.txt > "${RUNNER_TEMP}/test-requirements.txt"

@@ -333,6 +333,12 @@ def test_normalize_numbers_awkward_input_leaves_no_ascii_digit(text):
         ("1, 2 y 3 Juan", "primera, segunda y tercera de Juan"),
         ("1 o 2 Corintios", "primera o segunda de Corintios"),
         ("I y II Reyes.", "primero y segundo de Reyes."),
+        # The list pattern ignores case.
+        ("1 Y 2 Samuel", "primero y segundo de Samuel"),
+        ("1, 2 O 3 Juan", "primera, segunda o tercera de Juan"),
+        ("I e II Reyes", "primero y segundo de Reyes"),
+        # A lowercase "i" is not a Roman numeral.
+        ("i y 2 Samuel", "i y segundo de Samuel"),
         ("los versículos 1 y 2 Juan dice", "los versículos uno y dos Juan dice"),
     ],
 )
@@ -384,7 +390,7 @@ def test_normalize_numbers_ordinal_spellings(text, expected):
 
 _TOKENS = st.sampled_from(
     list("0123456789.,:;-–—$%ºª°/ \n\tIVXaeiouyACJTSRPſıİ¹½٣３")
-    + ["Juan ", "Corintios ", "Co. ", "Reyes ", "Crónicas", "Tesalonicenſes", "las ", "la ",
+    + [" Y ", " O ", " e ", "i ", "Juan ", "Samuel ", "Corintios ", "Co. ", "Reyes ", "Crónicas", "Tesalonicenſes", "las ", "la ",
        "de la mañana", "p.m.", "millones", "mil ", " personas", " años", "er", "da", " y ", " o "]
 )
 
