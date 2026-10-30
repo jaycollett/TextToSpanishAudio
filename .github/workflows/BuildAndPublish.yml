@@ -85,4 +85,6 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           format: table
+          # Reviewed, unreachable CVEs with their reasons; see the file.
+          trivyignores: .trivyignore
           exit-code: ${{ github.event_name == 'schedule' && '0' || '1' }}
