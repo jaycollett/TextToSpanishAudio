@@ -1,6 +1,8 @@
 import re
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from number_words import normalize_numbers
 
@@ -314,4 +316,80 @@ def test_normalize_numbers_every_integer_leaves_no_ascii_digit():
     ],
 )
 def test_normalize_numbers_awkward_input_leaves_no_ascii_digit(text):
+    assert not re.search(r"[0-9]", normalize_numbers(text))
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        # The full name keeps a sentence-ending period; an abbreviation's
+        # period goes with the abbreviation.
+        ("en 1 Juan. Y luego", "en primera de Juan. Y luego"),
+        ("en 2 Crónicas. Y luego", "en segundo de Crónicas. Y luego"),
+        ("1 Co. 13 dice", "primera de Corintios trece dice"),
+        # Every number in a list of books takes the book's gender.
+        ("1 y 2 Samuel", "primero y segundo de Samuel"),
+        ("1 y 2 Timoteo", "primera y segunda de Timoteo"),
+        ("1, 2 y 3 Juan", "primera, segunda y tercera de Juan"),
+        ("1 o 2 Corintios", "primera o segunda de Corintios"),
+        ("I y II Reyes.", "primero y segundo de Reyes."),
+        ("los versículos 1 y 2 Juan dice", "los versículos uno y dos Juan dice"),
+    ],
+)
+def test_normalize_numbers_numbered_book_periods_and_lists(text, expected):
+    assert normalize_numbers(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    # Under IGNORECASE these match the book pattern ("ſ" as "s", "ı" and "İ"
+    # as "i") but are not in the lookup tables.
+    ["1 Tesalonicenſes", "2 Cronicaſ", "1 Tımoteo", "İ Corintios", "İI Reyes"],
+)
+def test_normalize_numbers_odd_case_letters_do_not_raise(text):
+    assert not re.search(r"[0-9]", normalize_numbers(text))
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("el 2.5%", "el dos coma cinco por ciento"),
+        ("cuesta $1.50", "cuesta uno coma cincuenta dólares"),
+        ("unos $1.5 millones", "unos uno coma cinco millones de dólares"),
+        ("unos 21 mil hombres", "unos veintiún mil hombres"),
+        ("1 millón", "un millón"),
+    ],
+)
+def test_normalize_numbers_signs_before_references_and_apocope(text, expected):
+    out = normalize_numbers(text)
+    assert out == expected
+    assert "$" not in out and "%" not in out
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("el 11.º", "el undécimo"),
+        ("la 12.ª", "la duodécima"),
+        ("el 40.º", "el cuadragésimo"),
+        ("la 45.ª", "la cuadragésima quinta"),
+        ("el 400.º", "el cuadringentésimo"),
+        ("el 700.º", "el septingentésimo"),
+        ("el 800.º", "el octingentésimo"),
+    ],
+)
+def test_normalize_numbers_ordinal_spellings(text, expected):
+    assert normalize_numbers(text) == expected
+
+
+_TOKENS = st.sampled_from(
+    list("0123456789.,:;-–—$%ºª°/ \n\tIVXaeiouyACJTSRPſıİ¹½٣３")
+    + ["Juan ", "Corintios ", "Co. ", "Reyes ", "Crónicas", "Tesalonicenſes", "las ", "la ",
+       "de la mañana", "p.m.", "millones", "mil ", " personas", " años", "er", "da", " y ", " o "]
+)
+
+
+@settings(max_examples=2000, deadline=None, suppress_health_check=list(HealthCheck))
+@given(st.one_of(st.lists(_TOKENS, max_size=30).map("".join), st.text(max_size=60)))
+def test_normalize_numbers_never_raises_or_leaves_a_digit(text):
     assert not re.search(r"[0-9]", normalize_numbers(text))

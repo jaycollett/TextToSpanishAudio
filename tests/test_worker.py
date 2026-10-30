@@ -94,6 +94,20 @@ def test_synthesize_text_decodes_html_entities(worker, combined, tmp_path):
     assert tts.calls == ["la canción I Won't Back Down, \"dijo\""]
 
 
+def test_synthesize_text_falls_back_when_normalization_fails(worker, combined, tmp_path, monkeypatch, caplog):
+    def broken(text):
+        raise KeyError("rule bug")
+
+    monkeypatch.setattr(worker, "normalize_numbers", broken)
+    tts = FakeTTS()
+    with caplog.at_level("WARNING"):
+        worker.synthesize_text(tts, "Juan 3:16 y " + "9" * 20, str(tmp_path / "out.mp3"))
+
+    assert "Number normalization failed" in caplog.text
+    assert tts.calls[0].startswith("Juan tres:dieciséis y nueve nueve")
+    assert not any(c.isdigit() for call in tts.calls for c in call)
+
+
 def test_synthesize_text_logs_normalized_text(worker, combined, tmp_path, caplog):
     with caplog.at_level("DEBUG"):
         worker.synthesize_text(FakeTTS(), "Génesis capítulo 1.", str(tmp_path / "out.mp3"))

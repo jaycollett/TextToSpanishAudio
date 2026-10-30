@@ -1,5 +1,6 @@
 import html
 import os
+import re
 import sqlite3
 import logging
 import torch
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 from TTS.api import TTS
 from pydub import AudioSegment  # Used for concatenating audio segments
 from text_splitter import split_text
+from num2words import num2words
 from number_words import normalize_numbers
 
 # Global configuration values.
@@ -60,6 +62,13 @@ def combine_audio_files(file_list, output_file):
     # Export final audio file with 352kbps MP3 settings
     combined.export(output_file, format="mp3", bitrate="352k")
 
+def _read_digits_plainly(match):
+    """Fallback reading for a run of digits: a cardinal, or digit by digit if long."""
+    digits = match.group()
+    if len(digits) > 12:
+        return " ".join(num2words(int(d), lang="es") for d in digits)
+    return num2words(int(digits), lang="es")
+
 def synthesize_text(tts, text, output_file):
     """
     Write numbers out as words, split the text into segments no longer than
@@ -73,7 +82,14 @@ def synthesize_text(tts, text, output_file):
     #
     # Some stored transcripts still carry HTML entities ("Won&#39;t"), which
     # would otherwise be read out as numbers, so they are decoded first.
-    text = normalize_numbers(html.unescape(text or ""))
+    text = html.unescape(text or "")
+    try:
+        text = normalize_numbers(text)
+    except Exception:
+        # A bug in one of the reading rules should cost one odd reading, not
+        # the whole sermon. Every digit run is still read, as a plain number.
+        logging.warning("[WORKER] TTS - Number normalization failed; reading digits as plain numbers.", exc_info=True)
+        text = re.sub(r"[0-9]+", _read_digits_plainly, text)
     # Logged in full so the logs can show that no digit reaches the model.
     logging.debug("[WORKER] TTS - Normalized text: " + text)
     segments = split_text(text)

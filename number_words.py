@@ -80,6 +80,9 @@ _MASCULINE_NOUNS = {
     "capítulo", "capítulos", "punto", "puntos", "mandamiento", "mandamientos",
     "sello", "sellos", "ángel", "ángeles", "anciano", "ancianos", "niño",
     "niños", "kilómetro", "kilómetros", "metro", "metros", "siervo", "siervos",
+    # Not nouns of their own, but uno shortens before them the same way
+    # ("21 mil" is "veintiún mil").
+    "mil", "millón", "millones", "billón", "billones",
 }
 
 # Words before a bare number that make "1 Juan" a verse or chapter number
@@ -123,11 +126,13 @@ def normalize_numbers(text):
     if not text:
         return text
     text = _sub(_NUMBERED_BOOK, _numbered_book, text)
+    # A sign settles what the number is, so these go before references:
+    # "2.5%" is a decimal, not chapter 2, verse 5.
+    text = _sub(_PERCENT, lambda m, t: f"{_read_number(m.group(1))} por ciento", text)
+    text = _sub(_DOLLARS, _dollars, text)
     text = _sub(_CROSS_CHAPTER_REF, _cross_chapter_ref, text)
     text = _sub(_REFERENCE, _reference, text)
     text = _sub(_ORDINAL, _ordinal, text)
-    text = _sub(_PERCENT, lambda m, t: f"{_read_number(m.group(1))} por ciento", text)
-    text = _sub(_DOLLARS, _dollars, text)
     text = _sub(_RANGE, _range, text)
     text = _sub(_PLAIN_NUMBER, _plain_number, text)
     # Anything a rule above left behind (a stray digit next to other digits,
@@ -167,8 +172,11 @@ def _word_before(text, index):
     return _plain(match.group(1)) if match else ""
 
 
+_NEXT_WORD = re.compile(r"\s*(\w+)")
+
+
 def _word_after(text, index):
-    match = re.match(r"\s*(\w+)", text[index:])
+    match = _NEXT_WORD.match(text, index)
     return match.group(1).lower() if match else ""
 
 
@@ -187,6 +195,8 @@ def _ordinal(match, text):
     value = int(match.group(1))
     suffix = (match.group(2) or match.group(3)).lower()
     words = num2words(value, lang="es", to="ordinal")
+    for wrong, right in _ORDINAL_SPELLINGS.items():
+        words = words.replace(wrong, right)
     if suffix in ("ª", "ra", "da", "ta", "va", "ma", "na"):
         # num2words only writes the masculine form; every word of a Spanish
         # ordinal ends in -o and agrees in gender ("vigésima primera").
@@ -197,6 +207,16 @@ def _ordinal(match, text):
         words = re.sub(r"(primer|tercer)o$", r"\1", words)
     return words
 
+
+# num2words misspells a few ordinals; these are the RAE forms.
+_ORDINAL_SPELLINGS = {
+    "décimoprimero": "undécimo",
+    "décimosegundo": "duodécimo",
+    "quadragésimo": "cuadragésimo",
+    "cuadrigentésimo": "cuadringentésimo",
+    "septigentésimo": "septingentésimo",
+    "octigentésimo": "octingentésimo",
+}
 
 # Words that can follow a masculine ordinal without being the noun it
 # describes. An ordinal at the end of a sentence has no word after it and
@@ -251,8 +271,12 @@ def _agree(words, noun):
 
 # ---- Numbered books: "1 Corintios", "2ª Timoteo", "II Reyes", "1 Co." ----
 
+_BOOK_NUMBER = r"(?:[123]|III|II|I)(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?"
 _NUMBERED_BOOK = re.compile(
-    r"(?<![\w:.,])(?P<n>[123]|III|II|I)(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?\s+"
+    # "1 y 2 Samuel", "1, 2 y 3 Juan": the earlier numbers are part of the
+    # same name, so they are matched along with it.
+    rf"(?<![\w:.,])(?P<list>(?:{_BOOK_NUMBER}\s*,\s*)*{_BOOK_NUMBER}\s+[yo]\s+)?"
+    r"(?P<n>[123]|III|II|I)(?:\.?\s?[ºª°]|ra|ro|er|da|do|a)?\s+"
     # The keys are unaccented, so the accented spellings are added here.
     r"(?P<book>"
     + "|".join(sorted({*_NUMBERED_BOOKS, "crónicas", "crón"}, key=len, reverse=True))
@@ -272,11 +296,23 @@ def _numbered_book(match, text):
     # the names that mean nothing else are trusted in lowercase.
     if name[0].islower() and _plain(name) not in _LOWERCASE_BOOKS:
         return match.group()
-    book, gender = _NUMBERED_BOOKS[_plain(name)]
-    ordinal = _BOOK_ORDINAL_WORDS[(_BOOK_ORDINALS[number.lower()], gender)]
-    # The period after an abbreviation is dropped, along with the
-    # abbreviation: "1 Co. 13" is not the end of a sentence.
-    return f"{ordinal} de {book}"
+    entry = _NUMBERED_BOOKS.get(_plain(name))
+    earlier = re.findall(r"[123]|III|II|I", match.group("list") or "", re.IGNORECASE)
+    positions = [_BOOK_ORDINALS.get(n.lower()) for n in [*earlier, number]]
+    if entry is None or None in positions:
+        # IGNORECASE also matches "ſ" for "s" and "İ" for "I", which the
+        # lookups do not know.
+        return match.group()
+    book, gender = entry
+    ordinals = [_BOOK_ORDINAL_WORDS[(p, gender)] for p in positions]
+    if len(ordinals) > 1:
+        conjunction = re.search(r"\s([yo])\s+$", match.group("list")).group(1)
+        ordinals = [", ".join(ordinals[:-1]) + f" {conjunction} " + ordinals[-1]]
+    # The period after an abbreviation is dropped along with it: "1 Co. 13"
+    # is not the end of a sentence. After the full name ("en 1 Juan. Y")
+    # the period ends the sentence and stays.
+    period = "." if match.group().endswith(".") and _plain(name) == _plain(book) else ""
+    return f"{ordinals[0]} de {book}{period}"
 
 
 # ---- References and clock times: "3:16", "3:16-18", "3:16,18", "3:16-4:2" ----
