@@ -64,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Help with cuda vram use
-ENV Pexport=PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
+ENV PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:128"
 
 # NUMBA_CACHE_DIR / MPLBACKEND matter once the process is not root. librosa is
 # numba-jitted, and numba's default cache location is beside the module source
@@ -102,6 +102,12 @@ RUN groupadd --gid 1000 appuser \
     && chown -R appuser:appuser /app /opt/tts /home/appuser /data
 
 USER 1000:1000
+
+# Job database and generated audio. Declared after the chown above so a new
+# volume starts out owned by appuser. Mount a named volume or host path here;
+# otherwise Docker creates an anonymous volume that a recreated container
+# does not reuse.
+VOLUME /data
 
 # Expose the port your Flask app listens on
 EXPOSE 5055
