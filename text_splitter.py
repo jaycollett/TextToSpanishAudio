@@ -1,3 +1,4 @@
+import itertools
 import re
 
 # Upper bound on the characters handed to a single tts_to_file() call.
@@ -76,8 +77,9 @@ def _split(text, max_chars, level):
         # A single "word" longer than max_chars (a pasted URL or similar).
         # Cutting it is the only way to keep the segment within bounds.
         count = -(-len(text) // max_chars)
-        size = -(-len(text) // count)
-        return [text[i:i + size] for i in range(0, len(text), size)]
+        size, extra = divmod(len(text), count)
+        cuts = [i * size + min(i, extra) for i in range(count + 1)]
+        return [text[a:b] for a, b in itertools.pairwise(cuts)]
 
     pieces = []
     for piece in _BOUNDARIES[level].split(text):

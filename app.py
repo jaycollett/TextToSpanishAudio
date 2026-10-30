@@ -3,18 +3,14 @@ import sqlite3
 import os
 import logging
 import threading
-from sermon_worker import background_worker_loop, purge_old_jobs
+from sermon_worker import AUDIO_DIR, DB_PATH, background_worker_loop, purge_old_jobs
 
 # Configure logging with emojis
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define directories and database path
-DATA_DIR = "/data"
-DB_PATH = os.path.join(DATA_DIR, "jobs.db")
-AUDIO_DIR = os.path.join(DATA_DIR, "audiofiles")
-
-# Ensure the necessary directories exist
-os.makedirs(DATA_DIR, exist_ok=True)
+# Ensure the necessary directories exist. DB_PATH and AUDIO_DIR come from
+# sermon_worker so the API and the worker always use the same database.
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 app = Flask(__name__)

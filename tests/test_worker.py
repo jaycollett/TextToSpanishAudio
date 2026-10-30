@@ -1,4 +1,9 @@
+import math
+import shutil
 import sqlite3
+import struct
+import sys
+import wave
 from pathlib import Path
 
 import pytest
@@ -30,7 +35,13 @@ class FakeTTS:
 @pytest.fixture
 def combined(worker, monkeypatch):
     joined = []
-    monkeypatch.setattr(worker, "combine_audio_files", lambda files, out: joined.append(list(files)))
+
+    def fake_combine(files, out):
+        joined.append(list(files))
+        with open(out, "wb") as f:
+            f.writelines(Path(part).read_bytes() for part in files)
+
+    monkeypatch.setattr(worker, "combine_audio_files", fake_combine)
     return joined
 
 
@@ -85,7 +96,7 @@ def fetch_job(db_path, guid):
 
 
 @pytest.fixture
-def model(worker, app_module, monkeypatch, tmp_path):
+def model(worker, app_module, combined, monkeypatch, tmp_path):
     """Point the worker at the test database and hand it a FakeTTS."""
     audio_dir = tmp_path / "audiofiles"
     audio_dir.mkdir()
@@ -218,3 +229,64 @@ def test_submit_sermon_new_guid_created(client, app_module):
     resp = client.post("/sermon", json={"sermon_guid": "g-new", "transcription": "Hola."})
     assert resp.status_code == 201
     assert fetch_job(app_module.DB_PATH, "g-new")["status"] == "pending"
+
+
+class WavTTS:
+    """Writes a short tone as WAV, which is what coqui's tts_to_file produces."""
+
+    def tts_to_file(self, text, file_path):
+        frames = b"".join(
+            struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * n / 22050))) for n in range(2205)
+        )
+        with wave.open(file_path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(22050)
+            w.writeframes(frames)
+
+
+def is_mp3(data):
+    return data[:3] == b"ID3" or (data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+
+
+needs_real_pydub = pytest.mark.skipif(
+    not getattr(sys.modules.get("pydub"), "AudioSegment", None) or not shutil.which("ffmpeg"),
+    reason="needs pydub and ffmpeg",
+)
+
+
+@needs_real_pydub
+@pytest.mark.parametrize(
+    "text",
+    ["Hola a todos.", "Hola a todos, hermanos y hermanas. " * 30],
+    ids=["single-segment", "multi-segment"],
+)
+def test_synthesize_text_writes_real_mp3(worker, tmp_path, text):
+    out = tmp_path / "out.mp3"
+    worker.synthesize_text(WavTTS(), text, str(out))
+    data = out.read_bytes()
+    assert data[:4] != b"RIFF"
+    assert is_mp3(data), data[:4]
+    assert [p.name for p in tmp_path.iterdir()] == ["out.mp3"]
+
+
+def test_app_uses_worker_db_and_audio_paths(worker, monkeypatch, tmp_path):
+    import importlib
+    from unittest import mock
+
+    import app
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "custom.db"))
+    monkeypatch.setenv("AUDIO_DIR", str(tmp_path / "audio"))
+    try:
+        importlib.reload(worker)
+        with mock.patch("os.makedirs"):
+            importlib.reload(app)
+        assert app.DB_PATH == str(tmp_path / "custom.db")
+        assert app.AUDIO_DIR == str(tmp_path / "audio")
+    finally:
+        monkeypatch.delenv("DB_PATH")
+        monkeypatch.delenv("AUDIO_DIR")
+        importlib.reload(worker)
+        with mock.patch("os.makedirs"):
+            importlib.reload(app)

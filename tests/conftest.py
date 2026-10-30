@@ -17,15 +17,21 @@ _torch.cuda = types.SimpleNamespace(empty_cache=lambda: None)
 _tts = types.ModuleType("TTS")
 _tts_api = types.ModuleType("TTS.api")
 _tts_api.TTS = object
-_pydub = types.ModuleType("pydub")
-_pydub.AudioSegment = object
 for name, module in {
     "torch": _torch,
     "TTS": _tts,
     "TTS.api": _tts_api,
-    "pydub": _pydub,
 }.items():
     sys.modules.setdefault(name, module)
+
+# pydub is small, so the real one is used when it is installed; the MP3 output
+# tests need it (and ffmpeg) and skip otherwise.
+try:
+    import pydub  # noqa: F401
+except ImportError:
+    _pydub = types.ModuleType("pydub")
+    _pydub.AudioSegment = None
+    sys.modules["pydub"] = _pydub
 
 
 @pytest.fixture

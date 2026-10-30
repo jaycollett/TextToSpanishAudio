@@ -157,3 +157,8 @@ def test_split_text_overlong_single_word_is_cut_to_max():
     segments = split_text(f"Hola {word} adiós", max_chars=400)
     assert all(0 < len(s) <= 400 for s in segments)
     assert "".join(segments).replace(" ", "") == f"Hola{word}adiós"
+
+
+def test_split_text_overlong_word_cuts_are_balanced():
+    assert [len(s) for s in split_text("x" * 10, max_chars=4, min_chars=0)] == [4, 3, 3]
+    assert [len(s) for s in split_text("x" * 801, max_chars=400, min_chars=0)] == [267, 267, 267]

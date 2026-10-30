@@ -66,14 +66,13 @@ def synthesize_text(tts, text, output_file):
     segments = split_text(text)
     if not segments:
         raise ValueError("Transcription contains no speakable text")
-    if len(segments) == 1:
-        tts.tts_to_file(text=segments[0], file_path=output_file)
-        return
 
+    # tts_to_file always writes WAV, whatever the file name says, so even a
+    # single segment goes through combine_audio_files to become a real MP3.
     temp_files = []
     try:
         for i, segment in enumerate(segments):
-            temp_file = output_file + f".part{i}.mp3"
+            temp_file = output_file + f".part{i}.wav"
             temp_files.append(temp_file)
             tts.tts_to_file(text=segment, file_path=temp_file)
             gc.collect()
