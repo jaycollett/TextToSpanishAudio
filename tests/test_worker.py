@@ -108,6 +108,20 @@ def test_synthesize_text_falls_back_when_normalization_fails(worker, combined, t
     assert not any(c.isdigit() for call in tts.calls for c in call)
 
 
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Won&amp;#39;t", "Won't"),
+        ("el &amp;#49; de enero", "el uno de enero"),
+        ("&amp;amp;quot;hola&amp;amp;quot;", '"hola"'),
+    ],
+)
+def test_synthesize_text_decodes_double_encoded_entities(worker, combined, tmp_path, text, expected):
+    tts = FakeTTS()
+    worker.synthesize_text(tts, text, str(tmp_path / "out.mp3"))
+    assert tts.calls == [expected]
+
+
 def test_synthesize_text_logs_normalized_text(worker, combined, tmp_path, caplog):
     with caplog.at_level("DEBUG"):
         worker.synthesize_text(FakeTTS(), "Génesis capítulo 1.", str(tmp_path / "out.mp3"))

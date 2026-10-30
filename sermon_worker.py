@@ -81,8 +81,15 @@ def synthesize_text(tts, text, output_file):
     # ("Juan" | "3:16") would lose the book name that says how to read it.
     #
     # Some stored transcripts still carry HTML entities ("Won&#39;t"), which
-    # would otherwise be read out as numbers, so they are decoded first.
-    text = html.unescape(text or "")
+    # would otherwise be read out as numbers, so they are decoded first. A few
+    # are encoded twice ("&amp;#39;"), so decoding repeats until nothing
+    # changes, at most three times.
+    text = text or ""
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
     try:
         text = normalize_numbers(text)
     except Exception:
